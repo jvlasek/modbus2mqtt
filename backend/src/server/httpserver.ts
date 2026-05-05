@@ -336,6 +336,55 @@ export class HttpServer extends HttpServerBase {
         this.returnResult(req, res, HttpErrorsEnum.OK, JSON.stringify(result))
       })
     })
+    this.app.post(
+      apiUri.uploadLocal,
+      express.raw({ type: 'application/zip', limit: '50mb' }),
+      (req: express.Request, res: http.ServerResponse) => {
+        debug(req.url)
+        const buffer = req.body as Buffer
+        if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+          this.returnResult(
+            req as ExpressRequest,
+            res,
+            HttpErrorsEnum.ErrBadRequest,
+            JSON.stringify({ ok: false, message: 'No ZIP body received (Content-Type: application/zip required)' })
+          )
+          return
+        }
+        Config.importLocalZip(buffer)
+          .then(async (result) => {
+            if (result.ok) {
+              try {
+                MqttConnector.resetInstance()
+                await new Config().readYamlAsync()
+                new ConfigSpecification().readYaml()
+                ConfigBus.readBusses()
+                await Bus.readBussesFromConfig()
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                log.log(LogLevelEnum.error, 'Post-import reload failed: ' + msg)
+                this.returnResult(
+                  req as ExpressRequest,
+                  res,
+                  HttpErrorsEnum.SrvErrInternalServerError,
+                  JSON.stringify({ ok: false, message: 'imported but reload failed: ' + msg })
+                )
+                return
+              }
+            }
+            this.returnResult(req as ExpressRequest, res, result.status as unknown as HttpErrorsEnum, JSON.stringify(result))
+          })
+          .catch((e) => {
+            this.returnResult(
+              req as ExpressRequest,
+              res,
+              HttpErrorsEnum.SrvErrInternalServerError,
+              JSON.stringify({ ok: false, message: 'import error: ' + (e as Error).message })
+            )
+          })
+      }
+    )
+
     this.get(apiUri.download, (req: express.Request, res: http.ServerResponse) => {
       debug(req.url)
       if (req.params && req.params['what']) {
