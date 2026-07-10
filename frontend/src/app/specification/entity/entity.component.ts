@@ -43,7 +43,7 @@ import { MatOption } from '@angular/material/core'
 import { MatSelect } from '@angular/material/select'
 import { MatSlideToggle } from '@angular/material/slide-toggle'
 import { MatInput } from '@angular/material/input'
-import { MatFormField, MatLabel, MatError } from '@angular/material/form-field'
+import { MatFormField, MatLabel, MatError, MatSuffix } from '@angular/material/form-field'
 import { MatExpansionPanel, MatExpansionPanelHeader, MatExpansionPanelTitle } from '@angular/material/expansion'
 import { EntityValueControlComponent } from '../entity-value-control/entity-value-control.component'
 import { MatIcon } from '@angular/material/icon'
@@ -89,6 +89,7 @@ const newEntity: ImodbusEntityWithName = {
     MatIconButton,
     MatTooltip,
     MatIcon,
+    MatSuffix,
     NgClass,
     EntityValueControlComponent,
     MatCardContent,
@@ -113,11 +114,19 @@ export class EntityComponent extends SessionStorage implements AfterViewInit, On
   onMqttValueChange(_event: any, _entity: ImodbusEntity) {
     _event.target.value = 'YYYY'
   }
+  // Characters permitted in an entity mqttname. Besides [a-zA-Z0-9]:
+  //   '_' '-'   valid in MQTT topics and Home Assistant object_ids
+  //   '.' '[' ']'  structured mqttname: nest the value in the payload, e.g. "obis.obis_value"
+  //               or "arr[0]" (see Slave.parseMqttPath); discovery slugifies these for object_id.
+  // '/' stays blocked: it is the MQTT topic level separator and breaks the command topic
+  // filter (base/+/set/#), the Jinja2 value_template (division) and the HA object_id.
+  private static readonly mqttNameExtraChars = new Set(['_', '-', '.', '[', ']'])
   onMqttKeyPress($event: KeyboardEvent) {
     if (
       !('a' <= $event.key && $event.key <= 'z') &&
       !('A' <= $event.key && $event.key <= 'Z') &&
-      !('0' <= $event.key && $event.key <= '9')
+      !('0' <= $event.key && $event.key <= '9') &&
+      !EntityComponent.mqttNameExtraChars.has($event.key)
     ) {
       $event.stopImmediatePropagation()
       return false
