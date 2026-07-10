@@ -136,11 +136,34 @@
                     <mat-error> Must be unique </mat-error>
                   }
                 </mat-form-field>
-                @if ([0, 2].includes(uislave.slaveForm.get('pollMode')!.value)) {
-                  <mat-form-field class="width150pt">
-                    <mat-label>Poll Interval [ms]</mat-label>
-                    <input matInput formControlName="pollInterval" type="number" placeholder="1000" />
+                @if ([0, 2, 4].includes(uislave.slaveForm.get('pollMode')!.value)) {
+                  @if (!uislave.slaveForm.get('pollSchedule')!.value) {
+                    <mat-form-field class="width150pt">
+                      <mat-label>Poll Interval [ms]</mat-label>
+                      <input matInput formControlName="pollInterval" type="number" placeholder="1000" />
+                    </mat-form-field>
+                  }
+                  <mat-form-field class="width200pt">
+                    <mat-label>Poll Schedule</mat-label>
+                    <mat-select formControlName="pollSchedulePreset" (selectionChange)="onPollSchedulePresetChange(uislave.slaveForm)">
+                      @for (preset of pollSchedulePresets; track preset.value) {
+                        <mat-option [value]="preset.value">{{ preset.label }}</mat-option>
+                      }
+                      <mat-option [value]="pollScheduleCustom">Custom cron…</mat-option>
+                    </mat-select>
                   </mat-form-field>
+                  @if (uislave.slaveForm.get('pollSchedulePreset')!.value === pollScheduleCustom) {
+                    <mat-form-field class="width200pt">
+                      <mat-label>Custom cron</mat-label>
+                      <input matInput formControlName="pollSchedule" placeholder="0 * * * *" [matTooltip]="pollScheduleTooltip" />
+                      @if (uislave.slaveForm.get('pollSchedule')!.hasError('cron')) {
+                        <mat-error>Invalid cron — need 5 fields, e.g. "0 * * * *"</mat-error>
+                      }
+                    </mat-form-field>
+                  }
+                  @if (describeCron(uislave.slaveForm.get('pollSchedule')!.value); as scheduleDescription) {
+                    <div class="poll-schedule-hint">→ {{ scheduleDescription }}</div>
+                  }
                 }
                 <mat-form-field class="width150pt">
                   <mat-label>Poll Mode</mat-label>
@@ -149,6 +172,7 @@
                     <mat-option [value]="2">Interval and Triggger</mat-option>
                     <mat-option [value]="1">Trigger only</mat-option>
                     <mat-option [value]="3">No polling</mat-option>
+                    <mat-option [value]="4">HTTP Push (no MQTT)</mat-option>
                   </mat-select>
                 </mat-form-field>
               </mat-expansion-panel>
@@ -299,6 +323,52 @@
                   >
                   <h2>Deselect to exclude from Discovery</h2>
                   <mat-selection-list #noDiscovery formControlName="discoverEntitiesList">
+                    @for (selected of uislave.selectedEntitites; track $index) {
+                      <mat-list-option [value]="selected.id">{{ selected.name }}</mat-list-option>
+                    }
+                  </mat-selection-list>
+                </mat-expansion-panel>
+              }
+              @if (uislave.slave.specificationid; as specid) {
+                <mat-expansion-panel>
+                  <mat-expansion-panel-header>
+                    <mat-panel-title> HTTP Push </mat-panel-title>
+                  </mat-expansion-panel-header>
+                  <p>
+                    Push selected entity values to an external URL via HTTP POST. The URL is slave specific (e.g. it contains the
+                    device serial number). Set the poll mode to "HTTP Push (no MQTT)" to disable MQTT publishing for this slave.
+                  </p>
+                  <mat-form-field class="width550">
+                    <mat-label>URL</mat-label>
+                    <input
+                      matInput
+                      formControlName="httpPushUrl"
+                      [placeholder]="httpPushUrlPlaceholder"
+                      [matTooltip]="httpPushUrlTooltip"
+                    />
+                  </mat-form-field>
+                  <mat-form-field class="width550">
+                    <mat-label>Bearer PAT</mat-label>
+                    <input
+                      matInput
+                      type="password"
+                      formControlName="httpPushPat"
+                      autocomplete="new-password"
+                      [placeholder]="hasHttpPushPat(uislave) ? '•••••••• (stored, leave empty to keep)' : 'Personal Access Token'"
+                      matTooltip="Stored encrypted. Leave empty to keep the currently stored token."
+                    />
+                  </mat-form-field>
+                  <mat-form-field class="width550">
+                    <mat-label>Root (optional)</mat-label>
+                    <input
+                      matInput
+                      formControlName="httpPushRoot"
+                      placeholder="orbis"
+                      matTooltip="Send only this subtree of the payload, e.g. 'orbis' to post just the orbis array. Same path format as the entity MQTT name."
+                    />
+                  </mat-form-field>
+                  <h2>Select entities to push</h2>
+                  <mat-selection-list formControlName="pushEntitiesList">
                     @for (selected of uislave.selectedEntitites; track $index) {
                       <mat-list-option [value]="selected.id">{{ selected.name }}</mat-list-option>
                     }

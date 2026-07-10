@@ -61,6 +61,13 @@ export function stripSpecFileData<T extends { files?: { data?: string }[]; publi
 export function toApiSlave(slave: Islave): Islave {
   const rc = { ...slave }
   delete rc.specification
+  // Never expose the encrypted PAT to the frontend; signal its presence via hasPat instead.
+  if (rc.httpPush) {
+    const httpPush = { ...rc.httpPush } as typeof rc.httpPush & { hasPat?: boolean }
+    httpPush.hasPat = httpPush.patEnc != undefined && httpPush.patEnc.length > 0
+    delete httpPush.patEnc
+    rc.httpPush = httpPush
+  }
   return rc
 }
 

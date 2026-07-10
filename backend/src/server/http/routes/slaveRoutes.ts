@@ -3,6 +3,7 @@ import { Bus } from '../../bus.js'
 import { HttpErrorsEnum } from '../../../shared/specification/index.js'
 import { Islave, apiUri } from '../../../shared/server/index.js'
 import { ApiError, Registrar, created, ok, requireBusSlave, toApiSlave } from '../routeHelpers.js'
+import { encryptSecret } from '../../secureSecret.js'
 
 const debug = Debug('httpserver')
 
@@ -41,7 +42,21 @@ export function registerSlaveRoutes(r: Registrar): void {
     if (ctx.body.slaveid == undefined) {
       throw new ApiError(HttpErrorsEnum.ErrBadRequest, 'Slave Id is not defined')
     }
-    const rc: Islave = bus.writeSlave(ctx.body)
+    const incoming = ctx.body as Islave & { httpPush?: { pat?: string; hasPat?: boolean } }
+    if (incoming.httpPush) {
+      const existing = bus.getSlaveBySlaveId(incoming.slaveid)
+      const pat = incoming.httpPush.pat
+      if (typeof pat === 'string' && pat.length > 0) {
+        // New/changed plaintext PAT: encrypt at rest.
+        incoming.httpPush.patEnc = encryptSecret(pat)
+      } else if (existing?.httpPush?.patEnc) {
+        // Unchanged: keep the previously stored encrypted PAT.
+        incoming.httpPush.patEnc = existing.httpPush.patEnc
+      }
+      delete incoming.httpPush.pat
+      delete incoming.httpPush.hasPat
+    }
+    const rc: Islave = bus.writeSlave(incoming)
     return created(toApiSlave(rc))
   })
 
