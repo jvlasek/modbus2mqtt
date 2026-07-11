@@ -176,6 +176,7 @@ export interface Islave {
   configurationUrl?: string
   httpPush?: IhttpPush
   modbusStatusForSlave?: ImodbusStatusForSlave
+  maxRegistersPerRequest?: number // Default 125
 }
 export interface IidentificationSpecification {
   filename: string

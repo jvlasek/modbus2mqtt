@@ -40,6 +40,7 @@ import {
   getConnectionName,
   PollModes,
   Slave,
+  MAX_REGISTERS_PER_REQUEST_DEFAULT,
   Iconfiguration,
   IEntityCommandTopics,
   ImodbusStatusForSlave,
@@ -118,12 +119,21 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     'Full target URL. Use {{ path }} placeholders to insert entity values, e.g. {{ serialnumber }}.\n' +
     'The reserved {{ pollDate }} inserts the poll time as ISO 8601 UTC, e.g. 2026-07-10T08:00:00Z ' +
     '(e.g. ...?at={{ pollDate }}).'
+  readonly MAX_REGISTERS_PER_REQUEST_DEFAULT = MAX_REGISTERS_PER_REQUEST_DEFAULT
   readonly pollScheduleTooltip =
     'Optional Unix cron expression. When set it overrides Poll Interval.\n' +
     '5 fields: minute hour day-of-month month day-of-week.\n' +
     'Examples:  "0 * * * *" = every full hour    "*/15 * * * *" = every 15 min    "0 6 * * mon" = Mondays 06:00'
   // Lightweight client-side check (5 fields, allowed characters). The backend does the full
   // validation and skips polling on an invalid expression.
+  static maxRegistersPerRequestValidator(control: AbstractControl): ValidationErrors | null {
+    const value = control.value
+    if (value == null || value === '') return null
+    const n = Number(value)
+    if (!Number.isInteger(n) || n < 1 || n > 125) return { maxRegistersPerRequest: true }
+    return null
+  }
+
   static cronFormatValidator(control: AbstractControl): ValidationErrors | null {
     const value = control.value as string | null
     if (value == null || value.trim().length === 0) return null
@@ -572,6 +582,9 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     fg.get('httpPushPat')!.setValue(null) // never prefill the PAT into the form
     fg.get('httpPushRoot')!.setValue(slave.httpPush?.root ?? null)
     fg.get('pushEntitiesList')!.setValue(slave.httpPush?.pushEntities ?? [])
+    fg
+      .get('maxRegistersPerRequest')!
+      .setValue(slave.maxRegistersPerRequest ?? MAX_REGISTERS_PER_REQUEST_DEFAULT)
   }
 
   initiateSlaveControl(slave: Islave, defaultValue: IidentificationSpecification | null): FormGroup {
@@ -594,6 +607,10 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
         httpPushPat: [null as string | null],
         httpPushRoot: [slave.httpPush?.root],
         pushEntitiesList: [[] as number[]],
+        maxRegistersPerRequest: [
+          slave.maxRegistersPerRequest ?? MAX_REGISTERS_PER_REQUEST_DEFAULT,
+          SelectSlaveComponent.maxRegistersPerRequestValidator,
+        ],
       })
       this.slave2Form(slave, fg)
       return fg
@@ -678,7 +695,16 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     ;(uiSlave.slave as any)[controlname] = val == null ? undefined : val
   }
 
-  private static controllers: string[] = ['name', 'rootTopic', 'pollInterval', 'pollMode', 'qos', 'noDiscovery', 'configurationUrl']
+  private static controllers: string[] = [
+    'name',
+    'rootTopic',
+    'pollInterval',
+    'pollMode',
+    'qos',
+    'noDiscovery',
+    'configurationUrl',
+    'maxRegistersPerRequest',
+  ]
   private specCache = new Map<string, Ispecification>()
   private addSpecificationToUiSlave(uiSlave: IuiSlave, callback?: () => void) {
     const specId = uiSlave.slave.specificationid

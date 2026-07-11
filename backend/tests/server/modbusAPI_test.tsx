@@ -13,6 +13,7 @@ import {
   LogLevelEnum,
 } from '../../src/specification/index.js'
 import { ModbusAPI } from '../../src/server/modbusAPI.js'
+import { MAX_REGISTERS_PER_REQUEST_DEFAULT, ModbusTasks } from '../../src/shared/server/index.js'
 import { TempConfigDirHelper, getAvailablePort } from './testhelper.js'
 
 const debug = Debug('bustest')
@@ -171,6 +172,53 @@ it('Modbus getAvailableSpecs with specific slaveId no results 0-3', async () => 
   expect(ispec.length).toBeGreaterThan(0)
   Config['config'].fakeModbus = true
 })
+it('getMaxRegistersPerRequestBySlaveId uses slave config or default', () => {
+  const bus = Bus.getBus(0)!
+  bus.writeSlave({ slaveid: 88, maxRegistersPerRequest: 42 })
+  expect(bus.getMaxRegistersPerRequestBySlaveId(88)).toBe(42)
+  expect(bus.getMaxRegistersPerRequestBySlaveId(1)).toBe(MAX_REGISTERS_PER_REQUEST_DEFAULT)
+})
+
+it('readModbusRegister resolves maxRegistersPerRequest from slave config', async () => {
+  const bus = Bus.getBus(0)!
+  bus.writeSlave({ slaveid: 88, maxRegistersPerRequest: 42 })
+  const modbusAPI = new ModbusAPI(bus)
+  const executeSpy = vi.spyOn(modbusAPI['modbusRTUprocessor'], 'execute').mockResolvedValue(emptyModbusValues())
+  modbusAPI['modbusClient'] = { isOpen: true } as any
+  Config.setFakeModbus(false)
+
+  await modbusAPI.readModbusRegister(88, new Set(), { task: ModbusTasks.poll, errorHandling: { retry: true } })
+
+  expect(executeSpy).toHaveBeenCalledWith(
+    88,
+    expect.any(Set),
+    expect.objectContaining({ maxRegistersPerRequest: 42 })
+  )
+  executeSpy.mockRestore()
+})
+
+it('readModbusRegister keeps explicit maxRegistersPerRequest in options', async () => {
+  const bus = Bus.getBus(0)!
+  bus.writeSlave({ slaveid: 88, maxRegistersPerRequest: 42 })
+  const modbusAPI = new ModbusAPI(bus)
+  const executeSpy = vi.spyOn(modbusAPI['modbusRTUprocessor'], 'execute').mockResolvedValue(emptyModbusValues())
+  modbusAPI['modbusClient'] = { isOpen: true } as any
+  Config.setFakeModbus(false)
+
+  await modbusAPI.readModbusRegister(88, new Set(), {
+    task: ModbusTasks.poll,
+    errorHandling: { retry: true },
+    maxRegistersPerRequest: 10,
+  })
+
+  expect(executeSpy).toHaveBeenCalledWith(
+    88,
+    expect.any(Set),
+    expect.objectContaining({ maxRegistersPerRequest: 10 })
+  )
+  executeSpy.mockRestore()
+})
+
 describe('ServerTCP based', () => {
   it('read Discrete Inputs success, Illegal Address', async () => {
     expect.hasAssertions()

@@ -45,6 +45,7 @@ export interface IModbusConfiguration {
   getId: () => number
   getName: () => string
   getSlaveTimeoutBySlaveId: (slaveid: number) => number
+  getMaxRegistersPerRequestBySlaveId: (slaveid: number) => number
   getModbusConnection: () => IModbusConnection
 }
 
@@ -69,12 +70,19 @@ export class ModbusAPI implements IModbusAPI, IconsumerModbusAPI {
   readModbusRegister(slaveId: number, addresses: Set<ImodbusAddress>, options: IexecuteOptions): Promise<ImodbusValues> {
     if (Config.getConfiguration().fakeModbus) return submitGetHoldingRegisterRequest(slaveId, addresses)
 
-    if (this.modbusClient && this.modbusClient.isOpen) return this.modbusRTUprocessor.execute(slaveId, addresses, options)
+    const resolvedOptions: IexecuteOptions = {
+      ...options,
+      maxRegistersPerRequest:
+        options.maxRegistersPerRequest ?? this.modbusConfiguration.getMaxRegistersPerRequestBySlaveId(slaveId),
+    }
+
+    if (this.modbusClient && this.modbusClient.isOpen)
+      return this.modbusRTUprocessor.execute(slaveId, addresses, resolvedOptions)
     else
       return new Promise<ImodbusValues>((resolve, reject) => {
         this.initialConnect()
           .then(() => {
-            return this.modbusRTUprocessor.execute(slaveId, addresses, options).then(resolve).catch(reject)
+            return this.modbusRTUprocessor.execute(slaveId, addresses, resolvedOptions).then(resolve).catch(reject)
           })
           .catch((e) => {
             const addr = addresses.values().next().value

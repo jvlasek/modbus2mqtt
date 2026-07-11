@@ -19,6 +19,7 @@ import {
   IRTUConnection,
   ITCPConnection,
   IidentificationSpecification,
+  MAX_REGISTERS_PER_REQUEST_DEFAULT,
 } from '../shared/server/index.js'
 import { ConfigSpecification } from '../specification/index.js'
 import { ModbusTcpRtuBridge } from './tcprtubridge.js'
@@ -189,6 +190,11 @@ export class Bus implements IModbusConfiguration {
     const slave = this.getSlaveBySlaveId(slaveid)
     if (slave) if (slave.modbusTimout != undefined) return slave.modbusTimout
     return this.properties.connectionData.timeout
+  }
+  getMaxRegistersPerRequestBySlaveId(slaveid: number): number {
+    const slave = this.getSlaveBySlaveId(slaveid)
+    if (slave?.maxRegistersPerRequest != undefined) return slave.maxRegistersPerRequest
+    return MAX_REGISTERS_PER_REQUEST_DEFAULT
   }
   getModbusConnection(): IModbusConnection {
     return this.properties.connectionData

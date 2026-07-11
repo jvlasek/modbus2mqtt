@@ -3,7 +3,7 @@ import { ModbusRegisterType } from '../shared/specification/index.js'
 import { IQueueOptions, ModbusRTUQueue } from './modbusRTUqueue.js'
 import { Logger } from '../specification/index.js'
 import Debug from 'debug'
-import { ImodbusAddress, ModbusTasks } from '../shared/server/index.js'
+import { ImodbusAddress, MAX_REGISTERS_PER_REQUEST_DEFAULT, ModbusTasks } from '../shared/server/index.js'
 
 const debug = Debug('modbusrtuprocessor')
 const debugResult = Debug('modbusrtuprocessor:result')
@@ -15,6 +15,7 @@ const logNoticeMaxWaitTime = 1000 * 60 * 30 // 30 minutes
 
 export interface IexecuteOptions extends IQueueOptions {
   printLogs?: boolean
+  maxRegistersPerRequest?: number
   errorHandling: {
     split?: boolean
     retry?: boolean
@@ -30,7 +31,7 @@ export class ModbusRTUProcessor {
   private static lastNoticeMessage: string
 
   constructor(private queue: ModbusRTUQueue) {}
-  private prepare(slaveId: number, addresses: Set<ImodbusAddress>): ImodbusAddressesWithSlave {
+  private prepare(slaveId: number, addresses: Set<ImodbusAddress>, maxRegistersPerRequest: number): ImodbusAddressesWithSlave {
     const preparedAddresses: ImodbusAddress[] = []
 
     let previousAddress = {
@@ -46,10 +47,19 @@ export class ModbusRTUProcessor {
       if (v) return v
       return a.address - b.address
     })
+    
     for (const addr of sortedAddresses) {
-      if (previousAddress.address == -1) previousAddress = addr
-      if (startAddress.address == -1) startAddress = addr
-      if (addr.registerType != previousAddress.registerType || addr.address - previousAddress.address > maxAddressDelta) {
+      if (startAddress.address == -1) {
+        startAddress = addr
+        previousAddress = addr
+        continue
+      }
+      const spanIfMerged = addr.address - startAddress.address + 1
+      if (
+        addr.registerType != previousAddress.registerType ||
+        addr.address - previousAddress.address > maxAddressDelta ||
+        spanIfMerged > maxRegistersPerRequest
+      ) {
         preparedAddresses.push({
           address: startAddress.address,
           length: previousAddress.address - startAddress.address + 1,
@@ -101,7 +111,8 @@ export class ModbusRTUProcessor {
   }
   execute(slaveId: number, addresses: Set<ImodbusAddress>, options: IexecuteOptions): Promise<ImodbusValues> {
     return new Promise<ImodbusValues>((resolve) => {
-      const preparedAddresses = this.prepare(slaveId, addresses)
+      const maxRegistersPerRequest = options.maxRegistersPerRequest ?? MAX_REGISTERS_PER_REQUEST_DEFAULT
+      const preparedAddresses = this.prepare(slaveId, addresses, maxRegistersPerRequest)
 
       debug(ModbusTasks[options.task] + ': slaveId: ' + slaveId + '=====================')
       for (const a of preparedAddresses.addresses) {
