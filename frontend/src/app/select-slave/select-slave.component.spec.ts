@@ -113,7 +113,7 @@ describe('SelectSlaveComponent (vitest)', () => {
     const api = new ApiServiceMock()
     const component = createComponent(api)
 
-    component.uiSlaves = []
+    component.uiSlaves.set([])
     component.slaveNewForm.get('slaveId')!.setValue(2)
     component.slaveNewForm.get('detectSpec')!.setValue(false)
 
@@ -121,8 +121,8 @@ describe('SelectSlaveComponent (vitest)', () => {
 
     component.addSlave(component.slaveNewForm)
 
-    expect(component.uiSlaves.length).toBe(1)
-    expect(component.uiSlaves[0].slave.slaveid).toBe(2)
+    expect(component.uiSlaves().length).toBe(1)
+    expect(component.uiSlaves()[0].slave.slaveid).toBe(2)
   })
 
   it('deleteSlave calls API and removes slave', () => {
@@ -135,12 +135,12 @@ describe('SelectSlaveComponent (vitest)', () => {
       slaveForm: component.initiateSlaveControl(slave, null),
     } as any
 
-    component.uiSlaves = [uiSlave]
+    component.uiSlaves.set([uiSlave])
 
     component.deleteSlave(slave)
 
     expect(api.lastDelete?.busId).toBe(1)
     expect(api.lastDelete?.slaveId).toBe(1)
-    expect(component.uiSlaves.length).toBe(0)
+    expect(component.uiSlaves().length).toBe(0)
   })
 })

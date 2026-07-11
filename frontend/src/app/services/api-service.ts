@@ -178,7 +178,7 @@ export class ApiService {
     return this.httpClient.get<Islave[]>(this.getFullUri(apiUri.slaves) + `?busid=${busid}`).pipe(
       catchError((err) => {
         this.errorHandler(err)
-        return new Observable<Islave[]>()
+        return of([] as Islave[])
       })
     )
   }

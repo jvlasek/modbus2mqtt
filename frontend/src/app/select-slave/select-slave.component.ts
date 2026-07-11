@@ -110,7 +110,8 @@ interface IuiSlave {
   ],
 })
 export class SelectSlaveComponent extends SessionStorage implements OnInit {
-  preparedIdentSpecs: IidentificationSpecification[] | undefined
+  // Signals so async HTTP updates re-render under zoneless change detection.
+  preparedIdentSpecs = signal<IidentificationSpecification[] | undefined>(undefined)
   preparedSpecs: IspecificationSummary[] | undefined
   // Literal strings (contain {{ }}) kept out of the template to avoid Angular interpolation.
   readonly httpPushUrlPlaceholder = 'https://heimvio.de/readings/{{ serialnumber }}'
@@ -236,7 +237,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     })
   }
   showAllPublicSpecs = new FormControl<boolean>(false)
-  uiSlaves: IuiSlave[] = []
+  uiSlaves = signal<IuiSlave[]>([])
   config: Iconfiguration | undefined
   slaves: Islave[] = []
 
@@ -282,20 +283,23 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     })
   }
 
+  private replaceUiSlaves(slaves: IuiSlave[]): void {
+    this.uiSlaves.set(slaves)
+    this.generateSlavesArray()
+  }
+
+  /** Re-render after in-place uiSlave mutations under zoneless change detection. */
+  private touchUiSlaves(): void {
+    this.uiSlaves.update((list) => [...list])
+  }
+
   private updateSlaves(busId: number, detectSpec?: boolean) {
     this.entityApiService.getSlaves(busId).subscribe((slaves) => {
-      this.uiSlaves = []
-      slaves.forEach((s) => {
-        this.uiSlaves.push(this.getUiSlave(s, detectSpec))
-      })
-      this.generateSlavesArray()
+      this.replaceUiSlaves(slaves.map((s) => this.getUiSlave(s, detectSpec)))
     })
   }
   private generateSlavesArray(): void {
-    this.slaves = []
-    this.uiSlaves.forEach((uis) => {
-      this.slaves.push(uis.slave)
-    })
+    this.slaves = this.uiSlaves().map((uis) => uis.slave)
   }
   onRootTopicChange(uiSlave: IuiSlave): any {
     if (!uiSlave.slave || (uiSlave.slave as Islave).specificationid == undefined) return {}
@@ -304,12 +308,9 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       if (rootTopic) uiSlave.slave.rootTopic = rootTopic
       this.fillCommandTopics(uiSlave)
       uiSlave.slaveForm.updateValueAndValidity()
-      const newUiSlaves: IuiSlave[] = []
-      this.uiSlaves.forEach((uis) => {
-        if (uis.slave.slaveid == uiSlave.slave.slaveid) newUiSlaves.push(uiSlave)
-        else newUiSlaves.push(uis)
-      })
-      this.uiSlaves = newUiSlaves
+      this.replaceUiSlaves(
+        this.uiSlaves().map((uis) => (uis.slave.slaveid == uiSlave.slave.slaveid ? uiSlave : uis))
+      )
     })
   }
   fillCommandTopics(uiSlave: IuiSlave) {
@@ -434,8 +435,11 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   // depend on (config, preparedSpecs) have arrived. Called from the parallel load callbacks so
   // slave cards can render immediately and get their real names/options filled in a moment later.
   private refreshSpecDerivedState(): void {
-    if (this.preparedSpecs && this.config) this.preparedIdentSpecs = this.buildIdentSpecsList(undefined)
-    this.uiSlaves.forEach((u) => (u.label = this.getSlaveName(u.slave)))
+    if (this.preparedSpecs && this.config) this.preparedIdentSpecs.set(this.buildIdentSpecsList(undefined))
+    this.uiSlaves.update((list) => {
+      list.forEach((u) => (u.label = this.getSlaveName(u.slave)))
+      return [...list]
+    })
   }
   // Command topics and selected entities need config + bus + the slave's loaded specification.
   // Because the cards now render before getBus/getConfiguration resolve, fill them here too so a
@@ -443,11 +447,14 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   // addSpecificationToUiSlave callback covers the opposite ordering).
   private refreshLoadedSlaveDetails(): void {
     if (!this.config || !this.bus) return
-    this.uiSlaves.forEach((u) => {
-      if (u.slave.specification) {
-        u.selectedEntitites = this.getSelectedEntites(u.slave)
-        this.fillCommandTopics(u)
-      }
+    this.uiSlaves.update((list) => {
+      list.forEach((u) => {
+        if (u.slave.specification) {
+          u.selectedEntitites = this.getSelectedEntites(u.slave)
+          this.fillCommandTopics(u)
+        }
+      })
+      return [...list]
     })
   }
   // Lazily fetch the per-slave modbus identification (one device read) the first time the
@@ -491,16 +498,20 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     return rc
   }
   private updateUiSlaves(slave: Islave, detectSpec: boolean | undefined): void {
-    const idx = this.uiSlaves.findIndex((s) => s.slave.slaveid == slave.slaveid)
-    if (idx >= 0) this.uiSlaves[idx] = this.getUiSlave(slave, detectSpec)
-    else this.uiSlaves.push(this.getUiSlave(slave, detectSpec))
+    const list = [...this.uiSlaves()]
+    const idx = list.findIndex((s) => s.slave.slaveid == slave.slaveid)
+    if (idx >= 0) list[idx] = this.getUiSlave(slave, detectSpec)
+    else list.push(this.getUiSlave(slave, detectSpec))
+    this.replaceUiSlaves(list)
   }
   private updateUiSlaveData(slave: Islave): void {
-    const idx = this.uiSlaves.findIndex((s) => s.slave.slaveid == slave.slaveid)
-
+    const idx = this.uiSlaves().findIndex((s) => s.slave.slaveid == slave.slaveid)
     if (idx >= 0) {
-      this.uiSlaves[idx].slave = slave
-      this.uiSlaves[idx].label = this.getSlaveName(slave)
+      this.uiSlaves.update((list) => {
+        const copy = [...list]
+        copy[idx] = { ...copy[idx], slave, label: this.getSlaveName(slave) }
+        return copy
+      })
     }
   }
   ngOnDestroy(): void {
@@ -543,6 +554,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
           uiSlave.label = this.getSlaveName(uiSlave.slave)
           uiSlave.slaveForm.get('discoverEntitiesList')!.setValue(this.buildDiscoverEntityList(uiSlave.slave))
           uiSlave.slaveForm.get('noDiscovery')!.setValue(uiSlave.slave.noDiscovery)
+          this.touchUiSlaves()
         })
       }
     }
@@ -607,11 +619,11 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   hasDuplicateName(slaveId: number, name: string): boolean {
     let rc: boolean = false
     if (!name) {
-      const theSlave = this.uiSlaves.find((s) => s != null && s.slave.slaveid == slaveId)
+      const theSlave = this.uiSlaves().find((s) => s != null && s.slave.slaveid == slaveId)
       if (theSlave && theSlave.slave.specificationid) name = theSlave.slave.specificationid
     }
 
-    this.uiSlaves.forEach((uislave) => {
+    this.uiSlaves().forEach((uislave) => {
       if (uislave != null && uislave.slave.slaveid != slaveId) {
         const searchName: string | undefined = uislave.slave.name ? uislave.slave.name : uislave.slave.specificationid
         if (searchName == name) rc = true
@@ -632,11 +644,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   deleteSlave(slave: Islave | null) {
     if (slave != null && this.bus)
       this.entityApiService.deleteSlave(this.bus.busId, slave.slaveid).subscribe(() => {
-        const dIdx = this.uiSlaves.findIndex((uis) => uis.slave.slaveid == slave.slaveid)
-        if (dIdx >= 0) {
-          this.uiSlaves.splice(dIdx, 1)
-          if (this.bus) this.updateSlaves(this.bus.busId)
-        }
+        if (this.bus) this.updateSlaves(this.bus.busId)
       })
   }
 
@@ -649,7 +657,8 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   canAddSlaveId(newSlaveFormGroup: FormGroup): boolean {
     const slaveId: number = this.getSlaveIdFromForm(newSlaveFormGroup)
     return (
-      slaveId >= 0 && null == this.uiSlaves.find((uis) => uis != null && uis.slave.slaveid != null && uis.slave.slaveid == slaveId)
+      slaveId >= 0 &&
+      null == this.uiSlaves().find((uis) => uis != null && uis.slave.slaveid != null && uis.slave.slaveid == slaveId)
     )
   }
   addSlave(newSlaveFormGroup: FormGroup): void {
@@ -659,8 +668,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     if (this.canAddSlaveId(newSlaveFormGroup))
       this.entityApiService.postSlave(this.bus.busId, { slaveid: slaveId }).subscribe((slave) => {
         const newUiSlave = this.getUiSlave(slave, detectSpec)
-        const newUislaves = ([] as IuiSlave[]).concat(this.uiSlaves, [newUiSlave])
-        this.uiSlaves = newUislaves
+        this.replaceUiSlaves([...this.uiSlaves(), newUiSlave])
         // The value change during loading of selection list is before
         // Initialization of the UI
         // replacing this.uiSlaves with newUiSlaves will initialize and show it
@@ -745,12 +753,12 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       })
   }
   cancelSlave(uiSlave: IuiSlave) {
-    if (!this.preparedIdentSpecs) return
+    if (!this.preparedIdentSpecs()) return
     uiSlave.slaveForm.reset()
     SelectSlaveComponent.controllers.forEach((controlname) => {
       let value = (uiSlave.slave as any)[controlname]
       if (controlname == 'specificationid')
-        value = this.preparedIdentSpecs!.find((s) => s.filename == uiSlave.slave.specificationid)
+        value = this.preparedIdentSpecs()!.find((s) => s.filename == uiSlave.slave.specificationid)
       uiSlave.slaveForm.get(controlname)!.setValue(value)
     })
     this.slave2Form(uiSlave.slave, uiSlave.slaveForm)
@@ -855,7 +863,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     return rc
   }
   needsSaving(idx: number): boolean {
-    const fg = this.uiSlaves[idx].slaveForm
+    const fg = this.uiSlaves()[idx].slaveForm
     return fg == undefined || fg.touched
   }
   getNoDiscoveryText(uiSlave: IuiSlave) {
