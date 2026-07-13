@@ -5,6 +5,7 @@ import {
   FormControl,
   FormGroup,
   ValidationErrors,
+  ValidatorFn,
   FormsModule,
   ReactiveFormsModule,
 } from '@angular/forms'
@@ -22,6 +23,7 @@ import {
   Ispecification,
   IspecificationSummary,
   IidentEntity,
+  HttpErrorsEnum,
 } from '@shared/specification'
 import { getCurrentLanguage } from '../utils/language'
 import { Clipboard } from '@angular/cdk/clipboard'
@@ -44,9 +46,17 @@ import {
   Iconfiguration,
   IEntityCommandTopics,
   ImodbusStatusForSlave,
+  ModbusTasks,
 } from '@shared/server'
+import { HttpErrorResponse } from '@angular/common/http'
 import { MatInput } from '@angular/material/input'
-import { MatExpansionPanel, MatExpansionPanelHeader, MatExpansionPanelTitle } from '@angular/material/expansion'
+import {
+  MatExpansionPanel,
+  MatExpansionPanelContent,
+  MatExpansionPanelDescription,
+  MatExpansionPanelHeader,
+  MatExpansionPanelTitle,
+} from '@angular/material/expansion'
 import { MatOption } from '@angular/material/core'
 import { MatSelect } from '@angular/material/select'
 import { MatFormField, MatLabel, MatError } from '@angular/material/form-field'
@@ -74,6 +84,9 @@ interface IuiSlave {
   // Set once the per-slave modbus identification has been fetched lazily
   // (on first dropdown open). Keeps the initial page load free of N device reads.
   identSpecsLoaded?: boolean
+  // State of a manually triggered test poll. A signal so the result (and the refreshed
+  // Status & Errors) render under zoneless change detection when the http response arrives.
+  pollState: WritableSignal<{ running: boolean; message?: string }>
 }
 
 @Component({
@@ -103,6 +116,10 @@ interface IuiSlave {
     MatSelect,
     MatOption,
     MatExpansionPanel,
+    // Renders a panel's body only once it is opened: the cards hold five panels each, and rendering
+    // them all eagerly made every change detection cycle walk the whole (mostly invisible) DOM.
+    MatExpansionPanelContent,
+    MatExpansionPanelDescription,
     MatExpansionPanelHeader,
     MatExpansionPanelTitle,
     MatInput,
@@ -118,14 +135,15 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   readonly httpPushUrlTooltip =
     'Full target URL. Use {{ path }} placeholders to insert entity values, e.g. {{ serialnumber }}.\n' +
     'The reserved {{ pollDate }} inserts the poll time as ISO 8601 UTC, e.g. 2026-07-10T08:00:00Z ' +
-    '(e.g. ...?at={{ pollDate }}).'
-  readonly MAX_REGISTERS_PER_REQUEST_DEFAULT = MAX_REGISTERS_PER_REQUEST_DEFAULT
+    '(e.g. ...?at={{ pollDate }}).\n' +
+    'The reserved {{ slaveName }} inserts the Slave Name from Slave Settings ' +
+    '(e.g. ...?meter={{ slaveName }}). All values are URL-encoded.'
   readonly pollScheduleTooltip =
     'Optional Unix cron expression. When set it overrides Poll Interval.\n' +
     '5 fields: minute hour day-of-month month day-of-week.\n' +
     'Examples:  "0 * * * *" = every full hour    "*/15 * * * *" = every 15 min    "0 6 * * mon" = Mondays 06:00'
-  // Lightweight client-side check (5 fields, allowed characters). The backend does the full
-  // validation and skips polling on an invalid expression.
+  readonly MAX_REGISTERS_PER_REQUEST_DEFAULT = MAX_REGISTERS_PER_REQUEST_DEFAULT
+  // Some devices reject reads longer than their own limit, below the modbus maximum of 125.
   static maxRegistersPerRequestValidator(control: AbstractControl): ValidationErrors | null {
     const value = control.value
     if (value == null || value === '') return null
@@ -133,13 +151,70 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     if (!Number.isInteger(n) || n < 1 || n > 125) return { maxRegistersPerRequest: true }
     return null
   }
-
+  // Lightweight client-side check (5 fields, allowed characters). The backend does the full
+  // validation and skips polling on an invalid expression.
   static cronFormatValidator(control: AbstractControl): ValidationErrors | null {
     const value = control.value as string | null
     if (value == null || value.trim().length === 0) return null
     const fields = value.trim().split(/\s+/)
     if (fields.length !== 5) return { cron: true }
     return fields.every((f) => /^[*\d,/\-a-zA-Z]+$/.test(f)) ? null : { cron: true }
+  }
+
+  // Names the backend resolves in a push URL besides the entity mqtt names (see Slave.getResolvedHttpPushUrl)
+  private static readonly reservedPlaceholders = ['pollDate', 'slaveName']
+  // A well formed placeholder: {{ name }}, optional spaces, no braces inside.
+  private static readonly placeholderRegex = /\{\{\s*([^{}]+?)\s*\}\}/g
+
+  // Validates the {{ }} placeholders of the HTTP push URL against the entities of the slave's
+  // specification and the reserved names. The backend silently skips a push whose URL does not
+  // resolve, and a typo like "{pollDate }}" is not a placeholder at all - it would be sent verbatim.
+  private httpPushUrlValidator(slave: Islave): ValidatorFn {
+    return (control: AbstractControl): ValidationErrors | null => {
+      const url = control.value as string | null
+      if (!url || url.length == 0) return null
+      const names: string[] = []
+      const rest = url.replace(SelectSlaveComponent.placeholderRegex, (_match, name: string) => {
+        names.push(name)
+        return ''
+      })
+      // Anything left over means a brace does not belong to a well formed placeholder.
+      if (rest.includes('{') || rest.includes('}')) return { placeholderSyntax: true }
+      if (names.includes('slaveName')) {
+        const name = control.parent?.get('name')?.value ?? slave.name
+        if (!name || String(name).length == 0) return { slaveNameEmpty: true }
+      }
+      const known = this.getPlaceholderNames(slave)
+      // The specification (and with it the entity names) is fetched after the form was built.
+      // Until it is here only the syntax can be checked.
+      if (known == undefined) return null
+      const unknown = names.filter((n) => !known.includes(n))
+      return unknown.length > 0 ? { unknownPlaceholder: unknown.join(', ') } : null
+    }
+  }
+
+  // All names a push URL placeholder may use, or undefined while the specification is not loaded.
+  private getPlaceholderNames(slave: Islave): string[] | undefined {
+    const spec = slave.specification as ImodbusSpecification | undefined
+    if (!spec || !spec.entities) return undefined
+    const entityNames = spec.entities.map((e) => e.mqttname).filter((n): n is string => n != undefined && n.length > 0)
+    return [...SelectSlaveComponent.reservedPlaceholders, ...entityNames]
+  }
+
+  // Message below the URL field. Kept in the component because the texts contain {{ }}, which
+  // the template would interpolate.
+  getHttpPushUrlError(uiSlave: IuiSlave): string | null {
+    const control = uiSlave.slaveForm.get('httpPushUrl')
+    if (!control || !control.errors) return null
+    if (control.errors['placeholderSyntax'])
+      return 'Malformed placeholder: every {{ and }} must be doubled, e.g. {{ serialnumber }}.'
+    if (control.errors['slaveNameEmpty']) return '{{ slaveName }} is used, but this slave has no Slave Name.'
+    const unknown = control.errors['unknownPlaceholder']
+    if (unknown) {
+      const known = this.getPlaceholderNames(uiSlave.slave)
+      return 'Unknown placeholder: ' + unknown + '. Available: ' + (known ? known.join(', ') : '')
+    }
+    return null
   }
 
   // Common schedules offered in the preset dropdown ('' = no schedule, use the interval).
@@ -243,6 +318,9 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     this.slaveNewForm = this._formBuilder.group({
       slaveId: [null],
       detectSpec: [false],
+      // Optional reference to an existing slave: the new slave then inherits everything but
+      // name, slave id and root topic.
+      referenceSlaveId: [null as number | null],
     })
   }
   showAllPublicSpecs = new FormControl<boolean>(false)
@@ -263,6 +341,10 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   bus: IBus | undefined
   preselectedSlaveId: number | undefined = undefined
   @ViewChild('slavesBody') slavesBody: ElementRef | undefined
+  // The "New Slave" card: the link button on a slave card sends the user here with the reference preset.
+  // read: ElementRef because a bare ViewChild on <mat-card> yields the component, not the element.
+  @ViewChild('newSlaveCard', { read: ElementRef }) newSlaveCard: ElementRef | undefined
+  @ViewChild('newSlaveIdInput', { read: ElementRef }) newSlaveIdInput: ElementRef | undefined
   @Output() slaveidEventEmitter = new EventEmitter<number | undefined>()
   ngOnInit(): void {
     this.currentLanguage = getCurrentLanguage()
@@ -352,6 +434,9 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   // (empty strings) like the state payload example, since the spec carries no runtime mqttValue here.
   getHttpPushBody(uiSlave: IuiSlave): string | undefined {
     if (!this.config || !this.bus) return undefined
+    // A referencing slave has no HTTP Push panel (and no such form controls): its push configuration
+    // belongs to the slave it references, where the preview is shown.
+    if (this.isReference(uiSlave.slave)) return undefined
     const url: string | null = uiSlave.slaveForm.get('httpPushUrl')!.value
     if (!url || url.length === 0) return ''
     const root: string | null = uiSlave.slaveForm.get('httpPushRoot')!.value
@@ -476,6 +561,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       slave: slave,
       label: this.getSlaveName(slave),
       slaveForm: fg,
+      pollState: signal<{ running: boolean; message?: string }>({ running: false }),
     } as any
     // ReplaySubject(1) so the template's `| async` receives the spec list even when
     // loadIdentSpecs() resolves (microtask) before Angular subscribes via change detection.
@@ -484,6 +570,13 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     // preparedIdentSpecs list. The per-slave modbus identification is fetched lazily on first
     // dropdown open (loadIdentSpecs) to keep the initial page load free of N device reads.
     rc.specsObservable = new ReplaySubject<IidentificationSpecification[]>(1)
+    // A referencing slave's card shows neither the specification's entities nor an HTTP push preview,
+    // so it needs none of the specification-driven wiring below (and its form has no controls for it).
+    // The card label still resolves via preparedSpecs.
+    if (this.isReference(slave)) {
+      rc.httpPushBody = signal<string | undefined>(undefined)
+      return rc
+    }
     // Under zoneless CD the HTTP push body preview cannot be a template method call reading live
     // form values (nothing re-evaluates it). Drive a signal from the form's valueChanges instead so
     // selecting push entities or editing the root updates the preview immediately.
@@ -497,6 +590,8 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       fg.get('discoverEntitiesList')!.setValue(this.buildDiscoverEntityList(slave))
       // Recompute now that the specification (and thus entity list) is available.
       rc.httpPushBody!.set(this.getHttpPushBody(rc))
+      // The URL validator could only check the syntax while the entity names were unknown.
+      fg.get('httpPushUrl')!.updateValueAndValidity()
     })
     return rc
   }
@@ -566,6 +661,12 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     return rc
   }
   private slave2Form(slave: Islave, fg: FormGroup) {
+    // A referencing slave's form holds its own fields only - the inherited ones have no controls.
+    if (this.isReference(slave)) {
+      fg.get('name')!.setValue((slave.name ? slave.name : null) as string | null)
+      fg.get('rootTopic')!.setValue((slave.rootTopic ? slave.rootTopic : null) as string | null)
+      return
+    }
     fg.get('name')!.setValue((slave.name ? slave.name : null) as string | null)
     fg.get('specificationid')!.setValue({ filename: slave.specificationid })
     fg.get('pollInterval')!.setValue(slave.pollInterval ? slave.pollInterval : 1000)
@@ -582,12 +683,55 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     fg.get('httpPushPat')!.setValue(null) // never prefill the PAT into the form
     fg.get('httpPushRoot')!.setValue(slave.httpPush?.root ?? null)
     fg.get('pushEntitiesList')!.setValue(slave.httpPush?.pushEntities ?? [])
-    fg
-      .get('maxRegistersPerRequest')!
-      .setValue(slave.maxRegistersPerRequest ?? MAX_REGISTERS_PER_REQUEST_DEFAULT)
+    fg.get('maxRegistersPerRequest')!.setValue(slave.maxRegistersPerRequest ?? MAX_REGISTERS_PER_REQUEST_DEFAULT)
+  }
+
+  // A referencing slave owns only name/slaveid/rootTopic; everything else comes from the slave it
+  // references. Its card shows just those fields, so it can neither display nor save inherited values.
+  isReference(slave: Islave): boolean {
+    return slave.referenceSlaveId != undefined
+  }
+  // Slaves that may serve as a reference target: anything that is not a reference itself (the backend
+  // rejects chains) and not the slave in question.
+  referenceCandidates(slaveid?: number): Islave[] {
+    return this.uiSlaves.map((u) => u.slave).filter((s) => !this.isReference(s) && s.slaveid !== slaveid)
+  }
+  referencedSlave(slave: Islave): Islave | undefined {
+    return this.uiSlaves.find((u) => u.slave.slaveid === slave.referenceSlaveId)?.slave
+  }
+  // Shown on the referenced (root) card so it is visible which slaves follow its configuration.
+  referencingSlaves(slave: Islave): Islave[] {
+    return this.uiSlaves.map((u) => u.slave).filter((s) => s.referenceSlaveId === slave.slaveid)
+  }
+  // The header's link button: prepares the "New Slave" card with a reference to this slave. The slave
+  // id cannot be generated - it is the device's Modbus address - so the user enters it there and the
+  // new slave then inherits everything but name and MQTT root topic from this one.
+  addReferencingSlave(uiSlave: IuiSlave): void {
+    if (this.isReference(uiSlave.slave)) return
+    this.slaveNewForm.get('referenceSlaveId')!.setValue(uiSlave.slave.slaveid)
+    // optional calls: jsdom implements neither
+    this.newSlaveCard?.nativeElement?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    this.newSlaveIdInput?.nativeElement?.focus?.()
+  }
+  // Turns a referencing slave into a standalone one: it keeps the values it inherited (they are
+  // already materialized on the slave) and stops following the referenced slave.
+  detachSlave(uiSlave: IuiSlave): void {
+    if (!this.bus) return
+    delete uiSlave.slave.referenceSlaveId
+    this.entityApiService.postSlave(this.bus.busId, uiSlave.slave).subscribe((slave) => {
+      this.updateUiSlaves(slave, false)
+    })
   }
 
   initiateSlaveControl(slave: Islave, defaultValue: IidentificationSpecification | null): FormGroup {
+    if (slave.slaveid >= 0 && this.isReference(slave)) {
+      const fg = this._formBuilder.group({
+        hiddenSlaveId: [slave.slaveid],
+        name: [slave.name],
+        rootTopic: [slave.rootTopic],
+      })
+      return fg
+    }
     if (slave.slaveid >= 0) {
       const fg = this._formBuilder.group({
         hiddenSlaveId: [slave.slaveid],
@@ -603,7 +747,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
         noDiscovery: [false],
         configurationUrl: [slave.configurationUrl],
         discoverEntitiesList: [[]],
-        httpPushUrl: [slave.httpPush?.url],
+        httpPushUrl: [slave.httpPush?.url, this.httpPushUrlValidator(slave)],
         httpPushPat: [null as string | null],
         httpPushRoot: [slave.httpPush?.root],
         pushEntitiesList: [[] as number[]],
@@ -646,9 +790,51 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     else return null
   }
 
-  deleteSlave(slave: Islave | null) {
-    if (slave != null && this.bus)
-      this.entityApiService.deleteSlave(this.bus.busId, slave.slaveid).subscribe(() => {
+  // Runs one poll cycle for this slave now - modbus read, MQTT publish and HTTP push - no matter
+  // what its poll mode and interval say. The response carries the refreshed Status & Errors, so a
+  // failing device, broker or push endpoint becomes visible right in the card.
+  pollSlave(uiSlave: IuiSlave): void {
+    if (!this.bus || uiSlave.pollState().running) return
+    uiSlave.pollState.set({ running: true, message: 'Polling…' })
+    this.entityApiService
+      .pollSlave(this.bus.busId, uiSlave.slave.slaveid, (err) => {
+        uiSlave.pollState.set({ running: false, message: 'Poll failed: ' + this.getPollErrorText(err) })
+        // false: the api service still shows the error details
+        return false
+      })
+      .subscribe((slave) => {
+        this.updateUiSlaveData(slave)
+        uiSlave.pollState.set({ running: false, message: 'Polled at ' + new Date().toLocaleTimeString() })
+      })
+  }
+  private getPollErrorText(err: HttpErrorResponse): string {
+    if (err.error && err.error.error) return String(err.error.error)
+    if (err.error) return String(err.error)
+    return err.statusText ? err.statusText : err.message
+  }
+  getPollMessage(uiSlave: IuiSlave): string {
+    return uiSlave.pollState().message ?? ''
+  }
+  isPolling(uiSlave: IuiSlave): boolean {
+    return uiSlave.pollState().running
+  }
+
+  deleteSlave(slave: Islave | null, detachReferences: boolean = false) {
+    if (slave == null || !this.bus) return
+    this.entityApiService
+      .deleteSlave(this.bus.busId, slave.slaveid, detachReferences, (err) => {
+        // The backend refuses to delete a slave others reference. Offer to detach them: they keep the
+        // inherited configuration as their own and the slave can go.
+        if (err.status !== HttpErrorsEnum.ErrConflict) return false
+        const referencing = this.referencingSlaves(slave).map((s) => this.getSlaveName(s))
+        const ok = confirm(
+          `Slave ${slave.slaveid} is referenced by ${referencing.length} slave(s): ${referencing.join(', ')}.\n\n` +
+            'Detach them (they keep the inherited settings as their own) and delete this slave?'
+        )
+        if (ok) this.deleteSlave(slave, true)
+        return true
+      })
+      .subscribe(() => {
         const dIdx = this.uiSlaves.findIndex((uis) => uis.slave.slaveid == slave.slaveid)
         if (dIdx >= 0) {
           this.uiSlaves.splice(dIdx, 1)
@@ -673,11 +859,19 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     if (this.bus == undefined) return
     const slaveId: number = this.getSlaveIdFromForm(newSlaveFormGroup)
     const detectSpec = newSlaveFormGroup.get(['detectSpec'])?.value
+    // Optional: create the slave as a reference to an existing one - it then inherits everything but
+    // name, slave id and root topic, so identical meters are configured (and kept) in one place.
+    const referenceSlaveId: number | null = newSlaveFormGroup.get('referenceSlaveId')?.value ?? null
+    const newSlave: Islave = { slaveid: slaveId }
+    if (referenceSlaveId != null) newSlave.referenceSlaveId = referenceSlaveId
     if (this.canAddSlaveId(newSlaveFormGroup))
-      this.entityApiService.postSlave(this.bus.busId, { slaveid: slaveId }).subscribe((slave) => {
+      this.entityApiService.postSlave(this.bus.busId, newSlave).subscribe((slave) => {
         const newUiSlave = this.getUiSlave(slave, detectSpec)
         const newUislaves = ([] as IuiSlave[]).concat(this.uiSlaves, [newUiSlave])
         this.uiSlaves = newUislaves
+        // The slave id is now taken (and the reference has served its purpose): clear the card so the
+        // next slave starts from an empty form instead of an id that is no longer addable.
+        newSlaveFormGroup.reset({ slaveId: null, detectSpec: false, referenceSlaveId: null })
         // The value change during loading of selection list is before
         // Initialization of the UI
         // replacing this.uiSlaves with newUiSlaves will initialize and show it
@@ -705,6 +899,8 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     'configurationUrl',
     'maxRegistersPerRequest',
   ]
+  // The fields a referencing slave owns (see Islave.referenceSlaveId).
+  private static referenceControllers: string[] = ['name', 'rootTopic']
   private specCache = new Map<string, Ispecification>()
   private addSpecificationToUiSlave(uiSlave: IuiSlave, callback?: () => void) {
     const specId = uiSlave.slave.specificationid
@@ -740,6 +936,21 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     }
   }
   saveSlave(uiSlave: IuiSlave) {
+    // A referencing slave saves its own fields only. Writing back the inherited ones would bake in a
+    // copy that stops following the referenced slave (the backend discards them anyway).
+    if (this.isReference(uiSlave.slave)) {
+      SelectSlaveComponent.referenceControllers.forEach((controller) => {
+        SelectSlaveComponent.form2SlaveSetValue(uiSlave, controller)
+      })
+      const s = uiSlave.slave
+      this.postSaveSlaveRequest(uiSlave, {
+        slaveid: s.slaveid,
+        referenceSlaveId: s.referenceSlaveId,
+        name: s.name,
+        rootTopic: s.rootTopic,
+      })
+      return
+    }
     SelectSlaveComponent.controllers.forEach((controller) => {
       SelectSlaveComponent.form2SlaveSetValue(uiSlave, controller)
     })
@@ -764,15 +975,22 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       this.postSaveSlaveRequest(uiSlave)
     }
   }
-  private postSaveSlaveRequest(uiSlave: IuiSlave) {
+  // payload defaults to the whole slave; a referencing slave sends its own fields only.
+  private postSaveSlaveRequest(uiSlave: IuiSlave, payload?: Islave) {
     if (this.bus)
-      this.entityApiService.postSlave(this.bus.busId, uiSlave.slave).subscribe((slave) => {
+      this.entityApiService.postSlave(this.bus.busId, payload ?? uiSlave.slave).subscribe((slave) => {
         this.updateUiSlaves(slave, false)
       })
   }
   cancelSlave(uiSlave: IuiSlave) {
     if (!this.preparedIdentSpecs) return
     uiSlave.slaveForm.reset()
+    if (this.isReference(uiSlave.slave)) {
+      SelectSlaveComponent.referenceControllers.forEach((controlname) => {
+        uiSlave.slaveForm.get(controlname)!.setValue((uiSlave.slave as any)[controlname])
+      })
+      return
+    }
     SelectSlaveComponent.controllers.forEach((controlname) => {
       let value = (uiSlave.slave as any)[controlname]
       if (controlname == 'specificationid')
@@ -896,13 +1114,13 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   // reference on every change-detection cycle. Returning a fresh object literal (as before)
   // fed a new @Input into <app-modbus-error> each cycle, forcing it to re-render forever.
   private static readonly emptyModbusStatus: ImodbusStatusForSlave = {
-    requestCount: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    // one counter per ModbusTasks member, so the array grows with the enum
+    requestCount: new Array(Object.keys(ModbusTasks).length / 2).fill(0),
     errors: [],
     queueLength: 0,
   }
   getModbusErrors(uiSlave: IuiSlave): ImodbusStatusForSlave | undefined {
-    if (!uiSlave || !uiSlave.slave || !uiSlave.slave.modbusStatusForSlave)
-      return SelectSlaveComponent.emptyModbusStatus
+    if (!uiSlave || !uiSlave.slave || !uiSlave.slave.modbusStatusForSlave) return SelectSlaveComponent.emptyModbusStatus
     return uiSlave.slave.modbusStatusForSlave
   }
 }

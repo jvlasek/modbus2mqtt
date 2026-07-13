@@ -189,11 +189,7 @@ it('readModbusRegister resolves maxRegistersPerRequest from slave config', async
 
   await modbusAPI.readModbusRegister(88, new Set(), { task: ModbusTasks.poll, errorHandling: { retry: true } })
 
-  expect(executeSpy).toHaveBeenCalledWith(
-    88,
-    expect.any(Set),
-    expect.objectContaining({ maxRegistersPerRequest: 42 })
-  )
+  expect(executeSpy).toHaveBeenCalledWith(88, expect.any(Set), expect.objectContaining({ maxRegistersPerRequest: 42 }))
   executeSpy.mockRestore()
 })
 
@@ -211,11 +207,7 @@ it('readModbusRegister keeps explicit maxRegistersPerRequest in options', async 
     maxRegistersPerRequest: 10,
   })
 
-  expect(executeSpy).toHaveBeenCalledWith(
-    88,
-    expect.any(Set),
-    expect.objectContaining({ maxRegistersPerRequest: 10 })
-  )
+  expect(executeSpy).toHaveBeenCalledWith(88, expect.any(Set), expect.objectContaining({ maxRegistersPerRequest: 10 }))
   executeSpy.mockRestore()
 })
 
