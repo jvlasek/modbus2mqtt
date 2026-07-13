@@ -16,6 +16,9 @@ const PATH_TOKEN_RE = /\.?([A-Za-z_][A-Za-z0-9_]*)|\[(\d+)\]/g
 const STRUCTURED_MQTTNAME_RE = /[.[]/
 // Guard against pathological array allocation from a huge index.
 const MAX_ARRAY_INDEX = 1023
+// The default maximum number of registers per request, if not overridden by the slave configuration.
+// This is the maximum allowed by the MODBUS specification (125), but some devices may support fewer registers per request.
+export const MAX_REGISTERS_PER_REQUEST_DEFAULT = 125
 export class Slave {
   constructor(
     private busid: number,
@@ -319,6 +322,11 @@ export class Slave {
   getSpecificationId(): string | undefined {
     if (this.slave && this.slave.specificationid) return this.slave.specificationid
     return undefined
+  }
+
+  getMaxRegistersPerRequest(): number {
+    if (this.slave && this.slave.maxRegistersPerRequest) return this.slave.maxRegistersPerRequest
+    return MAX_REGISTERS_PER_REQUEST_DEFAULT
   }
   clone(): Slave {
     return new Slave(this.busid, structuredClone(this.slave), this.mqttBaseTopic)

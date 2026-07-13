@@ -331,7 +331,7 @@ export class ModbusRTUWorker extends ModbusWorker {
             current.errorState = ModbusErrorStates.noerror
             if (result.data) {
               this.updateCache(current, result.data)
-              debug('Success: ' + current.address.address)
+              debug('Success: ' + current.address.address + ' len:' + result.data.length)
               current.onResolve(current, result.data)
             }
             resolve()
@@ -414,7 +414,7 @@ export class ModbusRTUWorker extends ModbusWorker {
   private processOneEntry(): Promise<void> | undefined {
     const current = this.queue.dequeue()
     if (current) {
-      debug('processOneEntry: ql:' + this.queue.getLength() + ' address: ' + current?.address.address)
+      debug('processOneEntry: ql:' + this.queue.getLength() + ' address: ' + current?.address.address + ' len: ' + (current?.address.length ? current.address.length : 1))
       const dt = new Date()
       if (this.cache.get(current.slaveId) == undefined) this.cache.set(current.slaveId, this.createEmptyIModbusValues())
       const cacheEntry = this.cache.get(current.slaveId)

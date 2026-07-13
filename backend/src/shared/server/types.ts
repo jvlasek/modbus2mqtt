@@ -192,6 +192,7 @@ export interface Islave {
   configurationUrl?: string
   httpPush?: IhttpPush
   modbusStatusForSlave?: ImodbusStatusForSlave
+  maxRegistersPerRequest?: number // Default 125
 }
 
 // The only fields a referencing (child) slave owns. Everything else is inherited from the referenced
