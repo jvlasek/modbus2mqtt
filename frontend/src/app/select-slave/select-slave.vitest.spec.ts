@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing'
@@ -31,20 +31,22 @@ describe('Select Slave tests (vitest)', () => {
 
   /** Flush any pending GET /api/specification?spec=... requests with proper spec data */
   function flushSpecFetches(): void {
-    httpMock.match((r) => r.url.includes('/api/specification?spec=')).forEach((r) => {
-      const url = new URL(r.request.urlWithParams, 'http://localhost')
-      const specName = url.searchParams.get('spec')
-      r.flush({
-        filename: specName,
-        status: 0,
-        entities: [{ id: 1, name: specName + '.entity1', readonly: true, mqttname: 'e1' }],
-        i18n: [{ lang: 'en', texts: [{ textId: 'name', text: specName }] }],
-        files: [],
+    httpMock
+      .match((r) => r.url.includes('/api/specification?spec='))
+      .forEach((r) => {
+        const url = new URL(r.request.urlWithParams, 'http://localhost')
+        const specName = url.searchParams.get('spec')
+        r.flush({
+          filename: specName,
+          status: 0,
+          entities: [{ id: 1, name: specName + '.entity1', readonly: true, mqttname: 'e1' }],
+          i18n: [{ lang: 'en', texts: [{ textId: 'name', text: specName }] }],
+          files: [],
+        })
       })
-    })
   }
 
-  async function mount(): Promise<void> {
+  async function mount(slaves: unknown = slavesFixture): Promise<void> {
     ;(window as any).configuration = { rootUrl: '/' }
     ev = new EventEmitter<number | undefined>()
 
@@ -73,7 +75,7 @@ describe('Select Slave tests (vitest)', () => {
     httpMock.expectOne((r) => r.url.includes('/api/configuration')).flush(configurationFixture)
     httpMock.expectOne((r) => r.url.includes('/api/specifications')).flush(specificationsFixture)
     httpMock.expectOne((r) => r.url.includes('/api/bus')).flush(busFixture)
-    httpMock.expectOne((r) => r.url.includes('/api/slaves')).flush(slavesFixture)
+    httpMock.expectOne((r) => r.url.includes('/api/slaves')).flush(slaves)
 
     // Flush on-demand full spec fetches triggered by addSpecificationToUiSlave
     flushSpecFetches()
@@ -111,15 +113,17 @@ describe('Select Slave tests (vitest)', () => {
     safeDetectChanges()
 
     // Flush any modbus specification requests triggered by the change
-    httpMock.match((r) => r.url.includes('/api/modbus/specification')).forEach((r) =>
-      r.flush({
-        filename: 'second',
-        name: 'Second',
-        status: 0,
-        entities: [{ id: 1, name: 'second.entity1', readonly: true, mqttname: 'se1' }],
-        i18n: [{ lang: 'en', texts: [{ textId: 'name', text: 'Second' }] }],
-      })
-    )
+    httpMock
+      .match((r) => r.url.includes('/api/modbus/specification'))
+      .forEach((r) =>
+        r.flush({
+          filename: 'second',
+          name: 'Second',
+          status: 0,
+          entities: [{ id: 1, name: 'second.entity1', readonly: true, mqttname: 'se1' }],
+          i18n: [{ lang: 'en', texts: [{ textId: 'name', text: 'Second' }] }],
+        })
+      )
     safeDetectChanges()
 
     // Set pollMode to "Interval" (0) and a cron poll schedule
@@ -150,6 +154,128 @@ describe('Select Slave tests (vitest)', () => {
 
     // Flush any remaining requests
     httpMock.match(() => true).forEach((r) => r.flush([]))
+  })
+
+  describe('referencing slaves', () => {
+    // What the backend serves for a reference: the inherited fields are materialized, and
+    // referenceSlaveId marks it as following slave 1.
+    const referencingSlaves = [
+      slavesFixture[0],
+      {
+        slaveid: 2,
+        referenceSlaveId: 1,
+        name: 'child meter',
+        rootTopic: 'meters/child',
+        specificationid: 'dimplexpco5',
+        pollInterval: 500,
+        pollMode: 1,
+        httpPush: { url: 'https://heimvio.de/readings/{{ slaveName }}', pushEntities: [1] },
+      },
+    ]
+
+    it('shows the referencing slave with its own fields only', async () => {
+      await mount(referencingSlaves)
+      const component = fixture.componentInstance
+      const child = component.uiSlaves.find((u) => u.slave.slaveid === 2)!
+
+      expect(component.isReference(child.slave)).toBe(true)
+      // the form has no controls for the inherited fields, so they can neither be shown nor saved
+      expect(child.slaveForm.get('name')).not.toBeNull()
+      expect(child.slaveForm.get('rootTopic')).not.toBeNull()
+      expect(child.slaveForm.get('httpPushUrl')).toBeNull()
+      expect(child.slaveForm.get('pollMode')).toBeNull()
+      expect(child.slaveForm.get('specificationid')).toBeNull()
+      // no HTTP push preview on the child - that belongs to the referenced slave
+      expect(component.getHttpPushBody(child)).toBeUndefined()
+      // the root card knows who follows it
+      const root = component.uiSlaves.find((u) => u.slave.slaveid === 1)!
+      expect(component.referencingSlaves(root.slave).map((s) => s.slaveid)).toEqual([2])
+      expect(component.referencedSlave(child.slave)!.slaveid).toBe(1)
+      // a reference cannot reference a reference (the backend rejects chains)
+      expect(component.referenceCandidates(2).map((s) => s.slaveid)).toEqual([1])
+    })
+
+    it('saves only the own fields of a referencing slave', async () => {
+      await mount(referencingSlaves)
+      const component = fixture.componentInstance
+      const child = component.uiSlaves.find((u) => u.slave.slaveid === 2)!
+
+      child.slaveForm.get('name')!.setValue('renamed meter')
+      safeDetectChanges()
+      component.saveSlave(child)
+      safeDetectChanges()
+
+      const postReq = httpMock.expectOne((r) => r.method === 'POST' && r.url.includes('/api/slave'))
+      expect(postReq.request.body).toEqual({
+        slaveid: 2,
+        referenceSlaveId: 1,
+        name: 'renamed meter',
+        rootTopic: 'meters/child',
+      })
+      postReq.flush(postReq.request.body)
+      safeDetectChanges()
+      httpMock.match(() => true).forEach((r) => r.flush([]))
+    })
+
+    it('the card header link button prepares the New Slave card with the reference', async () => {
+      await mount()
+      const component = fixture.componentInstance
+      const root = component.uiSlaves.find((u) => u.slave.slaveid === 1)!
+
+      component.addReferencingSlave(root)
+      safeDetectChanges()
+
+      // The slave id is the device's Modbus address and cannot be generated: nothing is created yet,
+      // the user enters the id in the prepared New Slave card.
+      expect(component.slaveNewForm.get('referenceSlaveId')!.value).toBe(1)
+      httpMock.expectNone((r) => r.method === 'POST')
+
+      component.slaveNewForm.get('slaveId')!.setValue(7)
+      component.addSlave(component.slaveNewForm)
+      safeDetectChanges()
+
+      const postReq = httpMock.expectOne((r) => r.method === 'POST' && r.url.includes('/api/slave'))
+      expect(postReq.request.body).toEqual({ slaveid: 7, referenceSlaveId: 1 })
+
+      postReq.flush({ ...slavesFixture[0], slaveid: 7, referenceSlaveId: 1 })
+      safeDetectChanges()
+
+      const child = component.uiSlaves.find((u) => u.slave.slaveid === 7)!
+      expect(component.isReference(child.slave)).toBe(true)
+      expect(component.referencingSlaves(root.slave).map((s) => s.slaveid)).toEqual([7])
+      // slave id 7 is taken now, so the New Slave card must not keep it (nor the used reference)
+      expect(component.slaveNewForm.get('slaveId')!.value).toBeNull()
+      expect(component.slaveNewForm.get('referenceSlaveId')!.value).toBeNull()
+      httpMock.match(() => true).forEach((r) => r.flush([]))
+    })
+
+    it('offers to detach the references when deleting a referenced slave (409)', async () => {
+      await mount(referencingSlaves)
+      const component = fixture.componentInstance
+      const root = component.uiSlaves.find((u) => u.slave.slaveid === 1)!
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+      const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
+
+      component.deleteSlave(root.slave)
+      safeDetectChanges()
+
+      // the backend refuses: slave 1 is referenced by slave 2
+      const firstDelete = httpMock.expectOne((r) => r.method === 'DELETE' && r.url.includes('/api/slave'))
+      expect(firstDelete.request.urlWithParams).not.toContain('detachReferences')
+      firstDelete.flush({ error: 'Slave 1 is referenced by slave(s) 2' }, { status: 409, statusText: 'Conflict' })
+      safeDetectChanges()
+
+      // the user confirmed, so the delete is retried with detachReferences - and no alert is shown
+      expect(confirmSpy).toHaveBeenCalledOnce()
+      expect(alertSpy).not.toHaveBeenCalled()
+      const retry = httpMock.expectOne((r) => r.method === 'DELETE' && r.url.includes('detachReferences=true'))
+      retry.flush(null)
+      safeDetectChanges()
+
+      httpMock.match(() => true).forEach((r) => r.flush([]))
+      confirmSpy.mockRestore()
+      alertSpy.mockRestore()
+    })
   })
 
   it('http push body preview reacts to entity selection and root (zoneless)', async () => {

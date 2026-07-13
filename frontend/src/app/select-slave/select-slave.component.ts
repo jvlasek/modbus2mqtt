@@ -22,6 +22,7 @@ import {
   Ispecification,
   IspecificationSummary,
   IidentEntity,
+  HttpErrorsEnum,
 } from '@shared/specification'
 import { getCurrentLanguage } from '../utils/language'
 import { Clipboard } from '@angular/cdk/clipboard'
@@ -45,7 +46,12 @@ import {
   ImodbusStatusForSlave,
 } from '@shared/server'
 import { MatInput } from '@angular/material/input'
-import { MatExpansionPanel, MatExpansionPanelHeader, MatExpansionPanelTitle } from '@angular/material/expansion'
+import {
+  MatExpansionPanel,
+  MatExpansionPanelContent,
+  MatExpansionPanelHeader,
+  MatExpansionPanelTitle,
+} from '@angular/material/expansion'
 import { MatOption } from '@angular/material/core'
 import { MatSelect } from '@angular/material/select'
 import { MatFormField, MatLabel, MatError } from '@angular/material/form-field'
@@ -102,6 +108,9 @@ interface IuiSlave {
     MatSelect,
     MatOption,
     MatExpansionPanel,
+    // Renders a panel's body only once it is opened: the cards hold five panels each, and rendering
+    // them all eagerly made every change detection cycle walk the whole (mostly invisible) DOM.
+    MatExpansionPanelContent,
     MatExpansionPanelHeader,
     MatExpansionPanelTitle,
     MatInput,
@@ -235,6 +244,9 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     this.slaveNewForm = this._formBuilder.group({
       slaveId: [null],
       detectSpec: [false],
+      // Optional reference to an existing slave: the new slave then inherits everything but
+      // name, slave id and root topic.
+      referenceSlaveId: [null as number | null],
     })
   }
   showAllPublicSpecs = new FormControl<boolean>(false)
@@ -255,6 +267,10 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   bus: IBus | undefined
   preselectedSlaveId: number | undefined = undefined
   @ViewChild('slavesBody') slavesBody: ElementRef | undefined
+  // The "New Slave" card: the link button on a slave card sends the user here with the reference preset.
+  // read: ElementRef because a bare ViewChild on <mat-card> yields the component, not the element.
+  @ViewChild('newSlaveCard', { read: ElementRef }) newSlaveCard: ElementRef | undefined
+  @ViewChild('newSlaveIdInput', { read: ElementRef }) newSlaveIdInput: ElementRef | undefined
   @Output() slaveidEventEmitter = new EventEmitter<number | undefined>()
   ngOnInit(): void {
     this.currentLanguage = getCurrentLanguage()
@@ -344,6 +360,9 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   // (empty strings) like the state payload example, since the spec carries no runtime mqttValue here.
   getHttpPushBody(uiSlave: IuiSlave): string | undefined {
     if (!this.config || !this.bus) return undefined
+    // A referencing slave has no HTTP Push panel (and no such form controls): its push configuration
+    // belongs to the slave it references, where the preview is shown.
+    if (this.isReference(uiSlave.slave)) return undefined
     const url: string | null = uiSlave.slaveForm.get('httpPushUrl')!.value
     if (!url || url.length === 0) return ''
     const root: string | null = uiSlave.slaveForm.get('httpPushRoot')!.value
@@ -476,6 +495,13 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     // preparedIdentSpecs list. The per-slave modbus identification is fetched lazily on first
     // dropdown open (loadIdentSpecs) to keep the initial page load free of N device reads.
     rc.specsObservable = new ReplaySubject<IidentificationSpecification[]>(1)
+    // A referencing slave's card shows neither the specification's entities nor an HTTP push preview,
+    // so it needs none of the specification-driven wiring below (and its form has no controls for it).
+    // The card label still resolves via preparedSpecs.
+    if (this.isReference(slave)) {
+      rc.httpPushBody = signal<string | undefined>(undefined)
+      return rc
+    }
     // Under zoneless CD the HTTP push body preview cannot be a template method call reading live
     // form values (nothing re-evaluates it). Drive a signal from the form's valueChanges instead so
     // selecting push entities or editing the root updates the preview immediately.
@@ -558,6 +584,12 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     return rc
   }
   private slave2Form(slave: Islave, fg: FormGroup) {
+    // A referencing slave's form holds its own fields only - the inherited ones have no controls.
+    if (this.isReference(slave)) {
+      fg.get('name')!.setValue((slave.name ? slave.name : null) as string | null)
+      fg.get('rootTopic')!.setValue((slave.rootTopic ? slave.rootTopic : null) as string | null)
+      return
+    }
     fg.get('name')!.setValue((slave.name ? slave.name : null) as string | null)
     fg.get('specificationid')!.setValue({ filename: slave.specificationid })
     fg.get('pollInterval')!.setValue(slave.pollInterval ? slave.pollInterval : 1000)
@@ -576,7 +608,52 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     fg.get('pushEntitiesList')!.setValue(slave.httpPush?.pushEntities ?? [])
   }
 
+  // A referencing slave owns only name/slaveid/rootTopic; everything else comes from the slave it
+  // references. Its card shows just those fields, so it can neither display nor save inherited values.
+  isReference(slave: Islave): boolean {
+    return slave.referenceSlaveId != undefined
+  }
+  // Slaves that may serve as a reference target: anything that is not a reference itself (the backend
+  // rejects chains) and not the slave in question.
+  referenceCandidates(slaveid?: number): Islave[] {
+    return this.uiSlaves.map((u) => u.slave).filter((s) => !this.isReference(s) && s.slaveid !== slaveid)
+  }
+  referencedSlave(slave: Islave): Islave | undefined {
+    return this.uiSlaves.find((u) => u.slave.slaveid === slave.referenceSlaveId)?.slave
+  }
+  // Shown on the referenced (root) card so it is visible which slaves follow its configuration.
+  referencingSlaves(slave: Islave): Islave[] {
+    return this.uiSlaves.map((u) => u.slave).filter((s) => s.referenceSlaveId === slave.slaveid)
+  }
+  // The header's link button: prepares the "New Slave" card with a reference to this slave. The slave
+  // id cannot be generated - it is the device's Modbus address - so the user enters it there and the
+  // new slave then inherits everything but name and MQTT root topic from this one.
+  addReferencingSlave(uiSlave: IuiSlave): void {
+    if (this.isReference(uiSlave.slave)) return
+    this.slaveNewForm.get('referenceSlaveId')!.setValue(uiSlave.slave.slaveid)
+    // optional calls: jsdom implements neither
+    this.newSlaveCard?.nativeElement?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    this.newSlaveIdInput?.nativeElement?.focus?.()
+  }
+  // Turns a referencing slave into a standalone one: it keeps the values it inherited (they are
+  // already materialized on the slave) and stops following the referenced slave.
+  detachSlave(uiSlave: IuiSlave): void {
+    if (!this.bus) return
+    delete uiSlave.slave.referenceSlaveId
+    this.entityApiService.postSlave(this.bus.busId, uiSlave.slave).subscribe((slave) => {
+      this.updateUiSlaves(slave, false)
+    })
+  }
+
   initiateSlaveControl(slave: Islave, defaultValue: IidentificationSpecification | null): FormGroup {
+    if (slave.slaveid >= 0 && this.isReference(slave)) {
+      const fg = this._formBuilder.group({
+        hiddenSlaveId: [slave.slaveid],
+        name: [slave.name],
+        rootTopic: [slave.rootTopic],
+      })
+      return fg
+    }
     if (slave.slaveid >= 0) {
       const fg = this._formBuilder.group({
         hiddenSlaveId: [slave.slaveid],
@@ -631,9 +708,22 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     else return null
   }
 
-  deleteSlave(slave: Islave | null) {
-    if (slave != null && this.bus)
-      this.entityApiService.deleteSlave(this.bus.busId, slave.slaveid).subscribe(() => {
+  deleteSlave(slave: Islave | null, detachReferences: boolean = false) {
+    if (slave == null || !this.bus) return
+    this.entityApiService
+      .deleteSlave(this.bus.busId, slave.slaveid, detachReferences, (err) => {
+        // The backend refuses to delete a slave others reference. Offer to detach them: they keep the
+        // inherited configuration as their own and the slave can go.
+        if (err.status !== HttpErrorsEnum.ErrConflict) return false
+        const referencing = this.referencingSlaves(slave).map((s) => this.getSlaveName(s))
+        const ok = confirm(
+          `Slave ${slave.slaveid} is referenced by ${referencing.length} slave(s): ${referencing.join(', ')}.\n\n` +
+            'Detach them (they keep the inherited settings as their own) and delete this slave?'
+        )
+        if (ok) this.deleteSlave(slave, true)
+        return true
+      })
+      .subscribe(() => {
         const dIdx = this.uiSlaves.findIndex((uis) => uis.slave.slaveid == slave.slaveid)
         if (dIdx >= 0) {
           this.uiSlaves.splice(dIdx, 1)
@@ -658,11 +748,19 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     if (this.bus == undefined) return
     const slaveId: number = this.getSlaveIdFromForm(newSlaveFormGroup)
     const detectSpec = newSlaveFormGroup.get(['detectSpec'])?.value
+    // Optional: create the slave as a reference to an existing one - it then inherits everything but
+    // name, slave id and root topic, so identical meters are configured (and kept) in one place.
+    const referenceSlaveId: number | null = newSlaveFormGroup.get('referenceSlaveId')?.value ?? null
+    const newSlave: Islave = { slaveid: slaveId }
+    if (referenceSlaveId != null) newSlave.referenceSlaveId = referenceSlaveId
     if (this.canAddSlaveId(newSlaveFormGroup))
-      this.entityApiService.postSlave(this.bus.busId, { slaveid: slaveId }).subscribe((slave) => {
+      this.entityApiService.postSlave(this.bus.busId, newSlave).subscribe((slave) => {
         const newUiSlave = this.getUiSlave(slave, detectSpec)
         const newUislaves = ([] as IuiSlave[]).concat(this.uiSlaves, [newUiSlave])
         this.uiSlaves = newUislaves
+        // The slave id is now taken (and the reference has served its purpose): clear the card so the
+        // next slave starts from an empty form instead of an id that is no longer addable.
+        newSlaveFormGroup.reset({ slaveId: null, detectSpec: false, referenceSlaveId: null })
         // The value change during loading of selection list is before
         // Initialization of the UI
         // replacing this.uiSlaves with newUiSlaves will initialize and show it
@@ -681,6 +779,8 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   }
 
   private static controllers: string[] = ['name', 'rootTopic', 'pollInterval', 'pollMode', 'qos', 'noDiscovery', 'configurationUrl']
+  // The fields a referencing slave owns (see Islave.referenceSlaveId).
+  private static referenceControllers: string[] = ['name', 'rootTopic']
   private specCache = new Map<string, Ispecification>()
   private addSpecificationToUiSlave(uiSlave: IuiSlave, callback?: () => void) {
     const specId = uiSlave.slave.specificationid
@@ -716,6 +816,21 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     }
   }
   saveSlave(uiSlave: IuiSlave) {
+    // A referencing slave saves its own fields only. Writing back the inherited ones would bake in a
+    // copy that stops following the referenced slave (the backend discards them anyway).
+    if (this.isReference(uiSlave.slave)) {
+      SelectSlaveComponent.referenceControllers.forEach((controller) => {
+        SelectSlaveComponent.form2SlaveSetValue(uiSlave, controller)
+      })
+      const s = uiSlave.slave
+      this.postSaveSlaveRequest(uiSlave, {
+        slaveid: s.slaveid,
+        referenceSlaveId: s.referenceSlaveId,
+        name: s.name,
+        rootTopic: s.rootTopic,
+      })
+      return
+    }
     SelectSlaveComponent.controllers.forEach((controller) => {
       SelectSlaveComponent.form2SlaveSetValue(uiSlave, controller)
     })
@@ -740,15 +855,22 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       this.postSaveSlaveRequest(uiSlave)
     }
   }
-  private postSaveSlaveRequest(uiSlave: IuiSlave) {
+  // payload defaults to the whole slave; a referencing slave sends its own fields only.
+  private postSaveSlaveRequest(uiSlave: IuiSlave, payload?: Islave) {
     if (this.bus)
-      this.entityApiService.postSlave(this.bus.busId, uiSlave.slave).subscribe((slave) => {
+      this.entityApiService.postSlave(this.bus.busId, payload ?? uiSlave.slave).subscribe((slave) => {
         this.updateUiSlaves(slave, false)
       })
   }
   cancelSlave(uiSlave: IuiSlave) {
     if (!this.preparedIdentSpecs) return
     uiSlave.slaveForm.reset()
+    if (this.isReference(uiSlave.slave)) {
+      SelectSlaveComponent.referenceControllers.forEach((controlname) => {
+        uiSlave.slaveForm.get(controlname)!.setValue((uiSlave.slave as any)[controlname])
+      })
+      return
+    }
     SelectSlaveComponent.controllers.forEach((controlname) => {
       let value = (uiSlave.slave as any)[controlname]
       if (controlname == 'specificationid')
@@ -877,8 +999,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     queueLength: 0,
   }
   getModbusErrors(uiSlave: IuiSlave): ImodbusStatusForSlave | undefined {
-    if (!uiSlave || !uiSlave.slave || !uiSlave.slave.modbusStatusForSlave)
-      return SelectSlaveComponent.emptyModbusStatus
+    if (!uiSlave || !uiSlave.slave || !uiSlave.slave.modbusStatusForSlave) return SelectSlaveComponent.emptyModbusStatus
     return uiSlave.slave.modbusStatusForSlave
   }
 }
