@@ -90,6 +90,15 @@ describe('Select Slave tests (vitest)', () => {
     fixture?.destroy()
   })
 
+  it('renders slaves after HTTP without extra detectChanges (zoneless)', async () => {
+    await mount()
+    // mount() already flushed slaves; a single detectChanges after ngOnInit is enough.
+    const el = fixture.nativeElement as HTMLElement
+    expect(fixture.componentInstance.uiSlaves().length).toBe(1)
+    expect(el.querySelectorAll('mat-card.card').length).toBeGreaterThanOrEqual(1)
+    httpMock.match(() => true).forEach((r) => r.flush([]))
+  })
+
   it('mount and interact with slave', async () => {
     await mount()
 
@@ -97,14 +106,14 @@ describe('Select Slave tests (vitest)', () => {
     const el = fixture.nativeElement as HTMLElement
 
     // Verify slaves are populated
-    expect(component.uiSlaves.length).toBe(1)
-    expect(component.uiSlaves[0].slave.slaveid).toBe(1)
+    expect(component.uiSlaves().length).toBe(1)
+    expect(component.uiSlaves()[0].slave.slaveid).toBe(1)
 
     // Slaves arrive without an embedded specification (decoupled API); the
     // discover-entities list must be recomputed once the spec fetch resolved.
-    expect(component.uiSlaves[0].slaveForm.get('discoverEntitiesList')!.value).toEqual([1])
+    expect(component.uiSlaves()[0].slaveForm.get('discoverEntitiesList')!.value).toEqual([1])
 
-    const uiSlave = component.uiSlaves[0]
+    const uiSlave = component.uiSlaves()[0]
 
     // Set specificationid to the correct IidentificationSpecification object
     const secondSpec = { filename: 'second', name: 'Second', status: 0, identified: 1, entities: [] }
@@ -161,7 +170,7 @@ describe('Select Slave tests (vitest)', () => {
   // form flags it while the URL is being typed. The fixture spec has one entity, mqttname 'e1'.
   describe('http push url placeholders', () => {
     async function validate(url: string): Promise<string | null> {
-      const uiSlave = fixture.componentInstance.uiSlaves[0]
+      const uiSlave = fixture.componentInstance.uiSlaves()[0]
       uiSlave.slaveForm.get('httpPushUrl')!.setValue(url)
       safeDetectChanges()
       return fixture.componentInstance.getHttpPushUrlError(uiSlave)
@@ -191,7 +200,7 @@ describe('Select Slave tests (vitest)', () => {
 
     it('rejects slaveName when the slave has no name', async () => {
       await mount()
-      const uiSlave = fixture.componentInstance.uiSlaves[0]
+      const uiSlave = fixture.componentInstance.uiSlaves()[0]
       uiSlave.slaveForm.get('name')!.setValue('')
       expect(await validate('https://api/r?m={{ slaveName }}')).toContain('this slave has no Slave Name')
       httpMock.match(() => true).forEach((r) => r.flush([]))
@@ -204,7 +213,7 @@ describe('Select Slave tests (vitest)', () => {
     it('posts the poll and shows the refreshed status', async () => {
       await mount()
       const component = fixture.componentInstance
-      const uiSlave = component.uiSlaves[0]
+      const uiSlave = component.uiSlaves()[0]
 
       component.pollSlave(uiSlave)
       expect(component.isPolling(uiSlave)).toBe(true)
@@ -219,14 +228,14 @@ describe('Select Slave tests (vitest)', () => {
 
       expect(component.isPolling(uiSlave)).toBe(false)
       expect(component.getPollMessage(uiSlave)).toContain('Polled at')
-      expect(component.getModbusErrors(component.uiSlaves[0])!.requestCount[3]).toBe(9)
+      expect(component.getModbusErrors(component.uiSlaves()[0])!.requestCount[3]).toBe(9)
       httpMock.match(() => true).forEach((r) => r.flush([]))
     })
 
     it('reports a failing poll', async () => {
       await mount()
       const component = fixture.componentInstance
-      const uiSlave = component.uiSlaves[0]
+      const uiSlave = component.uiSlaves()[0]
       // the api service alerts the details; the card keeps the short message
       const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
       try {
@@ -266,7 +275,7 @@ describe('Select Slave tests (vitest)', () => {
     it('shows the referencing slave with its own fields only', async () => {
       await mount(referencingSlaves)
       const component = fixture.componentInstance
-      const child = component.uiSlaves.find((u) => u.slave.slaveid === 2)!
+      const child = component.uiSlaves().find((u) => u.slave.slaveid === 2)!
 
       expect(component.isReference(child.slave)).toBe(true)
       // the form has no controls for the inherited fields, so they can neither be shown nor saved
@@ -278,7 +287,7 @@ describe('Select Slave tests (vitest)', () => {
       // no HTTP push preview on the child - that belongs to the referenced slave
       expect(component.getHttpPushBody(child)).toBeUndefined()
       // the root card knows who follows it
-      const root = component.uiSlaves.find((u) => u.slave.slaveid === 1)!
+      const root = component.uiSlaves().find((u) => u.slave.slaveid === 1)!
       expect(component.referencingSlaves(root.slave).map((s) => s.slaveid)).toEqual([2])
       expect(component.referencedSlave(child.slave)!.slaveid).toBe(1)
       // a reference cannot reference a reference (the backend rejects chains)
@@ -288,7 +297,7 @@ describe('Select Slave tests (vitest)', () => {
     it('saves only the own fields of a referencing slave', async () => {
       await mount(referencingSlaves)
       const component = fixture.componentInstance
-      const child = component.uiSlaves.find((u) => u.slave.slaveid === 2)!
+      const child = component.uiSlaves().find((u) => u.slave.slaveid === 2)!
 
       child.slaveForm.get('name')!.setValue('renamed meter')
       safeDetectChanges()
@@ -310,7 +319,7 @@ describe('Select Slave tests (vitest)', () => {
     it('the card header link button prepares the New Slave card with the reference', async () => {
       await mount()
       const component = fixture.componentInstance
-      const root = component.uiSlaves.find((u) => u.slave.slaveid === 1)!
+      const root = component.uiSlaves().find((u) => u.slave.slaveid === 1)!
 
       component.addReferencingSlave(root)
       safeDetectChanges()
@@ -330,7 +339,7 @@ describe('Select Slave tests (vitest)', () => {
       postReq.flush({ ...slavesFixture[0], slaveid: 7, referenceSlaveId: 1 })
       safeDetectChanges()
 
-      const child = component.uiSlaves.find((u) => u.slave.slaveid === 7)!
+      const child = component.uiSlaves().find((u) => u.slave.slaveid === 7)!
       expect(component.isReference(child.slave)).toBe(true)
       expect(component.referencingSlaves(root.slave).map((s) => s.slaveid)).toEqual([7])
       // slave id 7 is taken now, so the New Slave card must not keep it (nor the used reference)
@@ -342,7 +351,7 @@ describe('Select Slave tests (vitest)', () => {
     it('offers to detach the references when deleting a referenced slave (409)', async () => {
       await mount(referencingSlaves)
       const component = fixture.componentInstance
-      const root = component.uiSlaves.find((u) => u.slave.slaveid === 1)!
+      const root = component.uiSlaves().find((u) => u.slave.slaveid === 1)!
       const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
       const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
 
@@ -370,7 +379,7 @@ describe('Select Slave tests (vitest)', () => {
 
   it('http push body preview reacts to entity selection and root (zoneless)', async () => {
     await mount()
-    const uiSlave = fixture.componentInstance.uiSlaves[0]
+    const uiSlave = fixture.componentInstance.uiSlaves()[0]
 
     // Deterministic spec so the preview does not depend on async spec loading.
     uiSlave.slave.specification = { entities: [{ id: 1, mqttname: 'e1' }] } as any
@@ -412,7 +421,7 @@ describe('Select Slave tests (vitest)', () => {
     expect(c.describeCron('5 4 3 2 1')).toBe('') // no confident translation
 
     // preset selection writes the cron into pollSchedule
-    const fg = c.uiSlaves[0].slaveForm
+    const fg = c.uiSlaves()[0].slaveForm
     fg.get('pollSchedulePreset')!.setValue('*/15 * * * *')
     c.onPollSchedulePresetChange(fg)
     expect(fg.get('pollSchedule')!.value).toBe('*/15 * * * *')
