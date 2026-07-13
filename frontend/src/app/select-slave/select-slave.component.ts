@@ -5,6 +5,7 @@ import {
   FormControl,
   FormGroup,
   ValidationErrors,
+  ValidatorFn,
   FormsModule,
   ReactiveFormsModule,
 } from '@angular/forms'
@@ -44,11 +45,14 @@ import {
   Iconfiguration,
   IEntityCommandTopics,
   ImodbusStatusForSlave,
+  ModbusTasks,
 } from '@shared/server'
+import { HttpErrorResponse } from '@angular/common/http'
 import { MatInput } from '@angular/material/input'
 import {
   MatExpansionPanel,
   MatExpansionPanelContent,
+  MatExpansionPanelDescription,
   MatExpansionPanelHeader,
   MatExpansionPanelTitle,
 } from '@angular/material/expansion'
@@ -79,6 +83,9 @@ interface IuiSlave {
   // Set once the per-slave modbus identification has been fetched lazily
   // (on first dropdown open). Keeps the initial page load free of N device reads.
   identSpecsLoaded?: boolean
+  // State of a manually triggered test poll. A signal so the result (and the refreshed
+  // Status & Errors) render under zoneless change detection when the http response arrives.
+  pollState: WritableSignal<{ running: boolean; message?: string }>
 }
 
 @Component({
@@ -111,6 +118,7 @@ interface IuiSlave {
     // Renders a panel's body only once it is opened: the cards hold five panels each, and rendering
     // them all eagerly made every change detection cycle walk the whole (mostly invisible) DOM.
     MatExpansionPanelContent,
+    MatExpansionPanelDescription,
     MatExpansionPanelHeader,
     MatExpansionPanelTitle,
     MatInput,
@@ -141,6 +149,62 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
     const fields = value.trim().split(/\s+/)
     if (fields.length !== 5) return { cron: true }
     return fields.every((f) => /^[*\d,/\-a-zA-Z]+$/.test(f)) ? null : { cron: true }
+  }
+
+  // Names the backend resolves in a push URL besides the entity mqtt names (see Slave.getResolvedHttpPushUrl)
+  private static readonly reservedPlaceholders = ['pollDate', 'slaveName']
+  // A well formed placeholder: {{ name }}, optional spaces, no braces inside.
+  private static readonly placeholderRegex = /\{\{\s*([^{}]+?)\s*\}\}/g
+
+  // Validates the {{ }} placeholders of the HTTP push URL against the entities of the slave's
+  // specification and the reserved names. The backend silently skips a push whose URL does not
+  // resolve, and a typo like "{pollDate }}" is not a placeholder at all - it would be sent verbatim.
+  private httpPushUrlValidator(slave: Islave): ValidatorFn {
+    return (control: AbstractControl): ValidationErrors | null => {
+      const url = control.value as string | null
+      if (!url || url.length == 0) return null
+      const names: string[] = []
+      const rest = url.replace(SelectSlaveComponent.placeholderRegex, (_match, name: string) => {
+        names.push(name)
+        return ''
+      })
+      // Anything left over means a brace does not belong to a well formed placeholder.
+      if (rest.includes('{') || rest.includes('}')) return { placeholderSyntax: true }
+      if (names.includes('slaveName')) {
+        const name = control.parent?.get('name')?.value ?? slave.name
+        if (!name || String(name).length == 0) return { slaveNameEmpty: true }
+      }
+      const known = this.getPlaceholderNames(slave)
+      // The specification (and with it the entity names) is fetched after the form was built.
+      // Until it is here only the syntax can be checked.
+      if (known == undefined) return null
+      const unknown = names.filter((n) => !known.includes(n))
+      return unknown.length > 0 ? { unknownPlaceholder: unknown.join(', ') } : null
+    }
+  }
+
+  // All names a push URL placeholder may use, or undefined while the specification is not loaded.
+  private getPlaceholderNames(slave: Islave): string[] | undefined {
+    const spec = slave.specification as ImodbusSpecification | undefined
+    if (!spec || !spec.entities) return undefined
+    const entityNames = spec.entities.map((e) => e.mqttname).filter((n): n is string => n != undefined && n.length > 0)
+    return [...SelectSlaveComponent.reservedPlaceholders, ...entityNames]
+  }
+
+  // Message below the URL field. Kept in the component because the texts contain {{ }}, which
+  // the template would interpolate.
+  getHttpPushUrlError(uiSlave: IuiSlave): string | null {
+    const control = uiSlave.slaveForm.get('httpPushUrl')
+    if (!control || !control.errors) return null
+    if (control.errors['placeholderSyntax'])
+      return 'Malformed placeholder: every {{ and }} must be doubled, e.g. {{ serialnumber }}.'
+    if (control.errors['slaveNameEmpty']) return '{{ slaveName }} is used, but this slave has no Slave Name.'
+    const unknown = control.errors['unknownPlaceholder']
+    if (unknown) {
+      const known = this.getPlaceholderNames(uiSlave.slave)
+      return 'Unknown placeholder: ' + unknown + '. Available: ' + (known ? known.join(', ') : '')
+    }
+    return null
   }
 
   // Common schedules offered in the preset dropdown ('' = no schedule, use the interval).
@@ -487,6 +551,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       slave: slave,
       label: this.getSlaveName(slave),
       slaveForm: fg,
+      pollState: signal<{ running: boolean; message?: string }>({ running: false }),
     } as any
     // ReplaySubject(1) so the template's `| async` receives the spec list even when
     // loadIdentSpecs() resolves (microtask) before Angular subscribes via change detection.
@@ -515,6 +580,8 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
       fg.get('discoverEntitiesList')!.setValue(this.buildDiscoverEntityList(slave))
       // Recompute now that the specification (and thus entity list) is available.
       rc.httpPushBody!.set(this.getHttpPushBody(rc))
+      // The URL validator could only check the syntax while the entity names were unknown.
+      fg.get('httpPushUrl')!.updateValueAndValidity()
     })
     return rc
   }
@@ -669,7 +736,7 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
         noDiscovery: [false],
         configurationUrl: [slave.configurationUrl],
         discoverEntitiesList: [[]],
-        httpPushUrl: [slave.httpPush?.url],
+        httpPushUrl: [slave.httpPush?.url, this.httpPushUrlValidator(slave)],
         httpPushPat: [null as string | null],
         httpPushRoot: [slave.httpPush?.root],
         pushEntitiesList: [[] as number[]],
@@ -706,6 +773,35 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   uniqueNameValidator: any = (slaveId: number, control: AbstractControl): ValidationErrors | null => {
     if (this.hasDuplicateName(slaveId, control.value)) return { duplicates: control.value }
     else return null
+  }
+
+  // Runs one poll cycle for this slave now - modbus read, MQTT publish and HTTP push - no matter
+  // what its poll mode and interval say. The response carries the refreshed Status & Errors, so a
+  // failing device, broker or push endpoint becomes visible right in the card.
+  pollSlave(uiSlave: IuiSlave): void {
+    if (!this.bus || uiSlave.pollState().running) return
+    uiSlave.pollState.set({ running: true, message: 'Polling…' })
+    this.entityApiService
+      .pollSlave(this.bus.busId, uiSlave.slave.slaveid, (err) => {
+        uiSlave.pollState.set({ running: false, message: 'Poll failed: ' + this.getPollErrorText(err) })
+        // false: the api service still shows the error details
+        return false
+      })
+      .subscribe((slave) => {
+        this.updateUiSlaveData(slave)
+        uiSlave.pollState.set({ running: false, message: 'Polled at ' + new Date().toLocaleTimeString() })
+      })
+  }
+  private getPollErrorText(err: HttpErrorResponse): string {
+    if (err.error && err.error.error) return String(err.error.error)
+    if (err.error) return String(err.error)
+    return err.statusText ? err.statusText : err.message
+  }
+  getPollMessage(uiSlave: IuiSlave): string {
+    return uiSlave.pollState().message ?? ''
+  }
+  isPolling(uiSlave: IuiSlave): boolean {
+    return uiSlave.pollState().running
   }
 
   deleteSlave(slave: Islave | null, detachReferences: boolean = false) {
@@ -994,7 +1090,8 @@ export class SelectSlaveComponent extends SessionStorage implements OnInit {
   // reference on every change-detection cycle. Returning a fresh object literal (as before)
   // fed a new @Input into <app-modbus-error> each cycle, forcing it to re-render forever.
   private static readonly emptyModbusStatus: ImodbusStatusForSlave = {
-    requestCount: [0, 0, 0, 0, 0, 0, 0, 0, 0],
+    // one counter per ModbusTasks member, so the array grows with the enum
+    requestCount: new Array(Object.keys(ModbusTasks).length / 2).fill(0),
     errors: [],
     queueLength: 0,
   }
