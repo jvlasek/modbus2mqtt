@@ -31,7 +31,7 @@ export enum PollModes {
   intervallHttpPushNoMqtt = 4, // interval poll + HTTP push, no MQTT state publishing
 }
 export interface IhttpPush {
-  url: string // full target URL, may contain {{ path }} placeholders, e.g. https://heimvio.de/readings/{{ serialnumber }}; reserved {{ pollDate }} = poll time as ISO 8601 UTC
+  url: string // full target URL, may contain {{ path }} placeholders, e.g. https://heimvio.de/readings/{{ serialnumber }}; reserved: {{ pollDate }} = poll time as ISO 8601 UTC, {{ slaveName }} = the slave's name
   patEnc?: string // AES-256-GCM encrypted Bearer PAT (base64), see secureSecret.ts
   pushEntities?: number[] // entity ids to include in the push payload
   root?: string // optional path (mqttname format) selecting a subtree of the push payload, e.g. "orbis"
@@ -128,6 +128,11 @@ export enum ModbusErrorStates {
   illegalfunctioncode,
   illegaladdress,
   initialConnect,
+  // States of the non-modbus tasks (mqttPublish, httpPush). New members must be appended,
+  // the numeric values are persisted in cached error lists.
+  connection, // broker/endpoint unreachable, refused, DNS failure
+  httpStatus, // HTTP push answered with a non 2xx status
+  configuration, // push URL placeholder or root path could not be resolved
 }
 
 export interface ImodbusAddress {
@@ -145,12 +150,19 @@ export enum ModbusTasks {
   entity = 5,
   writeEntity = 6,
   initialConnect = 7,
+  // Tasks which don't talk modbus. They share the per slave error list so the UI shows every
+  // failure of a poll cycle in one place. Append only: the value indexes requestCount.
+  mqttPublish = 8,
+  httpPush = 9,
 }
+// A failure of one task of a slave. Modbus tasks carry the failing register address, the
+// transport tasks (mqttPublish, httpPush) carry a message instead - they have no address.
 export interface ImodbusErrorsForSlave {
   task: ModbusTasks
   date: number
-  address: ImodbusAddress
+  address?: ImodbusAddress
   state: ModbusErrorStates
+  message?: string
 }
 export interface ImodbusStatusForSlave {
   requestCount: number[]
@@ -159,6 +171,10 @@ export interface ImodbusStatusForSlave {
 }
 export interface Islave {
   slaveid: number
+  // Inherits every field except slaveid/name/rootTopic from this slave of the same bus. The referenced
+  // slave must not be a reference itself (one level only). Persisted slaves carry only the own fields;
+  // the inherited ones are materialized in memory (see ConfigBus.resolveReference).
+  referenceSlaveId?: number
   specificationid?: string
   name?: string
   pollInterval?: number
@@ -177,6 +193,11 @@ export interface Islave {
   httpPush?: IhttpPush
   modbusStatusForSlave?: ImodbusStatusForSlave
 }
+
+// The only fields a referencing (child) slave owns. Everything else is inherited from the referenced
+// slave and is neither persisted on the child nor accepted from a client. Single source of truth for
+// ConfigBus.resolveReference() and BusPersistence.writeSlave().
+export const OWN_SLAVE_FIELDS: (keyof Islave)[] = ['slaveid', 'name', 'rootTopic', 'referenceSlaveId']
 export interface IidentificationSpecification {
   filename: string
   name?: string

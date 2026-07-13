@@ -1,10 +1,11 @@
-import { it, expect, describe, beforeAll, afterAll, jest } from '@jest/globals'
+import { it, expect, describe, beforeAll, beforeEach, afterAll, jest } from '@jest/globals'
 import * as fs from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { Converters, IfileSpecification, ModbusRegisterType, VariableTargetParameters } from '../../src/shared/specification/index.js'
-import { M2mSpecification } from '../../src/specification/index.js'
-import { Islave, PollModes, Slave } from '../../src/shared/server/index.js'
+import { Converters, ModbusRegisterType, VariableTargetParameters } from '../../src/shared/specification/index.js'
+import { IfileSpecification, M2mSpecification } from '../../src/specification/index.js'
+import { Islave, ModbusErrorStates, ModbusTasks, PollModes, Slave } from '../../src/shared/server/index.js'
+import { Bus } from '../../src/server/bus.js'
 import { ImodbusEntity, ImodbusSpecification } from '../../src/shared/specification/index.js'
 import { ConfigPersistence } from '../../src/server/persistence/configPersistence.js'
 import { encryptSecret, decryptSecret } from '../../src/server/secureSecret.js'
@@ -95,13 +96,7 @@ describe('Slave.parseMqttPath / mqttNameToObjectId', () => {
     expect(Slave.parseMqttPath('meters[0].obis')).toEqual([{ key: 'meters' }, { index: 0 }, { key: 'obis' }])
   })
   it('parses a deep nested object path', () => {
-    expect(Slave.parseMqttPath('a.b.c[0].key')).toEqual([
-      { key: 'a' },
-      { key: 'b' },
-      { key: 'c' },
-      { index: 0 },
-      { key: 'key' },
-    ])
+    expect(Slave.parseMqttPath('a.b.c[0].key')).toEqual([{ key: 'a' }, { key: 'b' }, { key: 'c' }, { index: 0 }, { key: 'key' }])
   })
   it('parses a root array path', () => {
     expect(Slave.parseMqttPath('[0].obis')).toEqual([{ index: 0 }, { key: 'obis' }])
@@ -162,13 +157,22 @@ describe('Slave.getStatePayload array support', () => {
   })
 
   it('leaves a hole (null) for sparse indices', () => {
-    const payload = JSON.parse(slave.getStatePayload([ent(1, 'meters[0].obis', 'a', 'value'), ent(2, 'meters[2].obis', 'c', 'value')]))
+    const payload = JSON.parse(
+      slave.getStatePayload([ent(1, 'meters[0].obis', 'a', 'value'), ent(2, 'meters[2].obis', 'c', 'value')])
+    )
     expect(payload.meters.length).toBe(3)
     expect(payload.meters[1]).toBeNull()
   })
 
   it('keeps modbusValues flat keyed by full mqttname for array select entities', () => {
-    const e = { id: 1, mqttname: 'meters[0].mode', converter: 'select', readonly: true, mqttValue: 'on', modbusValue: [3] } as unknown as ImodbusEntity
+    const e = {
+      id: 1,
+      mqttname: 'meters[0].mode',
+      converter: 'select',
+      readonly: true,
+      mqttValue: 'on',
+      modbusValue: [3],
+    } as unknown as ImodbusEntity
     const payload = JSON.parse(slave.getStatePayload([e]))
     expect(payload.meters[0].mode).toBe('on')
     expect(payload.modbusValues).toEqual({ 'meters[0].mode': 3 })
@@ -230,8 +234,19 @@ describe('Slave http push root + URL templating', () => {
   })
 
   it('substitutes {{ serialnumber }} (a device variable) into the URL, url-encoded', () => {
-    const sn = { id: 9, mqttname: 'serialnumber', converter: 'text', readonly: true, mqttValue: 'SN 1234/AB', variableConfiguration: { targetParameter: VariableTargetParameters.deviceSerialNumber } } as unknown as ImodbusEntity
-    const slave = new Slave(0, { slaveid: 1, httpPush: { url: 'https://api/readings/{{ serialnumber }}', pushEntities: [1] } }, 'm2m')
+    const sn = {
+      id: 9,
+      mqttname: 'serialnumber',
+      converter: 'text',
+      readonly: true,
+      mqttValue: 'SN 1234/AB',
+      variableConfiguration: { targetParameter: VariableTargetParameters.deviceSerialNumber },
+    } as unknown as ImodbusEntity
+    const slave = new Slave(
+      0,
+      { slaveid: 1, httpPush: { url: 'https://api/readings/{{ serialnumber }}', pushEntities: [1] } },
+      'm2m'
+    )
     expect(slave.getResolvedHttpPushUrl([sn, ...orbisEntities])).toBe('https://api/readings/SN%201234%2FAB')
   })
 
@@ -256,7 +271,11 @@ describe('Slave http push root + URL templating', () => {
   })
 
   it('substitutes the reserved {{ pollDate }} with the poll time, url-encoded', () => {
-    const slave = new Slave(0, { slaveid: 1, httpPush: { url: 'https://api/readings?at={{ pollDate }}', pushEntities: [1] } }, 'm2m')
+    const slave = new Slave(
+      0,
+      { slaveid: 1, httpPush: { url: 'https://api/readings?at={{ pollDate }}', pushEntities: [1] } },
+      'm2m'
+    )
     const pollDate = new Date('2026-07-10T08:00:03.500Z')
     expect(slave.getResolvedHttpPushUrl(orbisEntities, pollDate)).toBe('https://api/readings?at=2026-07-10T08%3A00%3A00Z')
   })
@@ -270,6 +289,39 @@ describe('Slave http push root + URL templating', () => {
     )
     const pollDate = new Date('2026-07-10T08:00:00.000Z')
     expect(slave.getResolvedHttpPushUrl([sn], pollDate)).toBe('https://api/readings/1EMH0011111111?at=2026-07-10T08%3A00%3A00Z')
+  })
+
+  it('substitutes the reserved {{ slaveName }} with the slave name, url-encoded', () => {
+    const slave = new Slave(
+      0,
+      { slaveid: 1, name: 'Zähler Küche/EG', httpPush: { url: 'https://api/readings?meter={{ slaveName }}', pushEntities: [1] } },
+      'm2m'
+    )
+    expect(slave.getResolvedHttpPushUrl(orbisEntities)).toBe('https://api/readings?meter=Z%C3%A4hler%20K%C3%BCche%2FEG')
+  })
+
+  it('returns null for {{ slaveName }} when the slave has no name', () => {
+    const slave = new Slave(
+      0,
+      { slaveid: 1, httpPush: { url: 'https://api/readings?meter={{ slaveName }}', pushEntities: [1] } },
+      'm2m'
+    )
+    expect(slave.getResolvedHttpPushUrl(orbisEntities)).toBeNull()
+  })
+
+  it('combines {{ slaveName }}, an entity placeholder and {{ pollDate }} in one URL', () => {
+    const sn = ent(9, 'serialnumber', '1EMH0011111111', 'text')
+    const slave = new Slave(
+      0,
+      {
+        slaveid: 1,
+        name: 'Meter 1',
+        httpPush: { url: 'https://api/{{ slaveName }}/{{ serialnumber }}?at={{ pollDate }}', pushEntities: [1] },
+      },
+      'm2m'
+    )
+    const pollDate = new Date('2026-07-10T08:00:00.000Z')
+    expect(slave.getResolvedHttpPushUrl([sn], pollDate)).toBe('https://api/Meter%201/1EMH0011111111?at=2026-07-10T08%3A00%3A00Z')
   })
 })
 
@@ -353,6 +405,69 @@ describe('HttpPush.pushState (poll process)', () => {
     const slave = new Slave(0, { slaveid: 1, httpPush: { url: 'https://api/x', root: 'missing', pushEntities: [1] } }, 'm2m')
     await HttpPush.pushState(slave, spec)
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+// A failed push must show up in the slave's Status & Errors panel next to the modbus errors.
+describe('HttpPush.pushState error reporting', () => {
+  let originalFetch: typeof globalThis.fetch
+  let errors: { task: ModbusTasks; state: ModbusErrorStates; message: string }[]
+  let counted: ModbusTasks[]
+  let getBusSpy: ReturnType<typeof jest.spyOn>
+
+  const spec = {
+    entities: [{ id: 1, mqttname: 'power', converter: 'number', readonly: true, mqttValue: 5 }],
+  } as unknown as ImodbusSpecification
+  const slave = new Slave(0, { slaveid: 7, httpPush: { url: 'https://api/x', pushEntities: [1] } }, 'm2m')
+
+  beforeAll(() => {
+    originalFetch = globalThis.fetch
+  })
+  afterAll(() => {
+    globalThis.fetch = originalFetch
+    getBusSpy.mockRestore()
+  })
+  beforeEach(() => {
+    errors = []
+    counted = []
+    const modbusAPI = {
+      addSlaveError: (_slaveid: number, task: ModbusTasks, state: ModbusErrorStates, message: string) =>
+        errors.push({ task, state, message }),
+      countRequest: (_slaveid: number, task: ModbusTasks) => counted.push(task),
+    }
+    getBusSpy = jest.spyOn(Bus, 'getBus').mockReturnValue({ getModbusAPI: () => modbusAPI } as any)
+  })
+
+  it('records a non 2xx response as httpStatus error', async () => {
+    globalThis.fetch = jest.fn(async () => ({ ok: false, status: 503, statusText: 'Service Unavailable' }) as any) as any
+    await HttpPush.pushState(slave, spec)
+    expect(errors).toEqual([
+      { task: ModbusTasks.httpPush, state: ModbusErrorStates.httpStatus, message: '503 Service Unavailable' },
+    ])
+    expect(counted).toEqual([])
+  })
+
+  it('records an unreachable endpoint as connection error', async () => {
+    globalThis.fetch = jest.fn(async () => {
+      throw new Error('fetch failed')
+    }) as any
+    await HttpPush.pushState(slave, spec)
+    expect(errors).toEqual([{ task: ModbusTasks.httpPush, state: ModbusErrorStates.connection, message: 'fetch failed' }])
+  })
+
+  it('records an unresolvable URL placeholder as configuration error', async () => {
+    globalThis.fetch = jest.fn(async () => ({ ok: true, status: 200, statusText: 'OK' }) as any) as any
+    const unresolvable = new Slave(0, { slaveid: 7, httpPush: { url: 'https://api/{{ serialnumber }}', pushEntities: [1] } }, 'm2m')
+    await HttpPush.pushState(unresolvable, spec)
+    expect(errors.map((e) => e.state)).toEqual([ModbusErrorStates.configuration])
+    expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('counts a successful push instead of recording an error', async () => {
+    globalThis.fetch = jest.fn(async () => ({ ok: true, status: 200, statusText: 'OK' }) as any) as any
+    await HttpPush.pushState(slave, spec)
+    expect(errors).toEqual([])
+    expect(counted).toEqual([ModbusTasks.httpPush])
   })
 })
 
